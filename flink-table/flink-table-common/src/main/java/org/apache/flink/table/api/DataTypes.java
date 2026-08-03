@@ -44,6 +44,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DescriptorType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -840,6 +841,33 @@ public final class DataTypes {
      */
     public static DataType DESCRIPTOR() {
         return new AtomicDataType(new DescriptorType());
+    }
+
+    /**
+     * Data type of a function (i.e. a lambda expression) mapping a fixed list of argument types to
+     * a single result type.
+     *
+     * <p>This type is intended to be used for higher-order function arguments such as the lambda
+     * passed to {@code TRANSFORM(array, x -> x + 1)}.
+     *
+     * <p>Note: The runtime does not materialize a value of this type. It is a pure helper type
+     * during translation and planning. Table columns cannot be declared with this type.
+     *
+     * @see FunctionType
+     */
+    public static DataType FUNCTION(DataType resultDataType, DataType... argumentDataTypes) {
+        Preconditions.checkNotNull(resultDataType, "Result data type must not be null.");
+        Preconditions.checkNotNull(argumentDataTypes, "Argument data types must not be null.");
+        final List<LogicalType> argumentTypes =
+                Stream.of(argumentDataTypes)
+                        .map(
+                                dataType ->
+                                        Preconditions.checkNotNull(
+                                                        dataType,
+                                                        "Argument data type must not be null.")
+                                                .getLogicalType())
+                        .collect(Collectors.toList());
+        return new AtomicDataType(new FunctionType(argumentTypes, resultDataType.getLogicalType()));
     }
 
     /**

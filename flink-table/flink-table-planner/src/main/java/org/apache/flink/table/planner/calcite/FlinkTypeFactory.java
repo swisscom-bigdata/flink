@@ -28,6 +28,7 @@ import org.apache.flink.table.calcite.ExtendedRelTypeFactory;
 import org.apache.flink.table.legacy.api.TableSchema;
 import org.apache.flink.table.legacy.types.logical.TypeInformationRawType;
 import org.apache.flink.table.planner.plan.schema.BitmapRelDataType;
+import org.apache.flink.table.planner.plan.schema.FunctionRelDataType;
 import org.apache.flink.table.planner.plan.schema.GenericRelDataType;
 import org.apache.flink.table.planner.plan.schema.RawRelDataType;
 import org.apache.flink.table.planner.plan.schema.StructuredRelDataType;
@@ -46,6 +47,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DescriptorType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LegacyTypeInformationType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
@@ -230,6 +232,8 @@ public class FlinkTypeFactory extends JavaTypeFactoryImpl implements ExtendedRel
             newType = ((StructuredRelDataType) relDataType).createWithNullability(isNullable);
         } else if (relDataType instanceof BitmapRelDataType) {
             newType = ((BitmapRelDataType) relDataType).createWithNullability(isNullable);
+        } else if (relDataType instanceof FunctionRelDataType) {
+            newType = ((FunctionRelDataType) relDataType).createWithNullability(isNullable);
         } else if (relDataType instanceof GenericRelDataType) {
             final GenericRelDataType generic = (GenericRelDataType) relDataType;
             newType = new GenericRelDataType(generic.genericType(), isNullable, getTypeSystem());
@@ -278,15 +282,12 @@ public class FlinkTypeFactory extends JavaTypeFactoryImpl implements ExtendedRel
             // return type with nullability
             return Optional.of(createTypeWithNullability(head, nullable));
         } else {
-            // types are not all the same
-            if (types.stream().anyMatch(t -> t.getSqlTypeName() == SqlTypeName.ANY)) {
-                // one of the type was RAW.
-                // we cannot generate a common type if it differs from other types.
-                throw new TableException("Generic RAW types must have a common type information.");
-            } else {
-                // cannot resolve a common type for different input types
-                return Optional.empty();
-            }
+            // Types are not all the same. Defer to the default least-restrictive logic. In
+            // particular, when one of the types is ANY (e.g. an unresolved lambda parameter during
+            // the first validation pass of a higher-order function body, or a generic RAW type),
+            // ANY is treated as the top type. Concrete types are resolved in a later validation
+            // pass.
+            return Optional.empty();
         }
     }
 
@@ -491,6 +492,9 @@ public class FlinkTypeFactory extends JavaTypeFactoryImpl implements ExtendedRel
 
             case BITMAP:
                 return new BitmapRelDataType((BitmapType) logicalType);
+
+            case FUNCTION:
+                return new FunctionRelDataType((FunctionType) logicalType);
 
             default:
                 throw new TableException("Type is not supported: " + logicalType);
@@ -865,6 +869,8 @@ public class FlinkTypeFactory extends JavaTypeFactoryImpl implements ExtendedRel
                     return ((RawRelDataType) relDataType).getRawType();
                 } else if (relDataType instanceof BitmapRelDataType) {
                     return ((BitmapRelDataType) relDataType).getBitmapType();
+                } else if (relDataType instanceof FunctionRelDataType) {
+                    return ((FunctionRelDataType) relDataType).getFunctionType();
                 } else {
                     throw new TableException("Type is not supported: " + relDataType);
                 }

@@ -106,6 +106,69 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
     }
 
     @Test
+    void testCreateMaterializedTableWithLambdaFunctions() throws Exception {
+        // End-to-end coverage that lambdas (ARRAY_FILTER / TRANSFORM) survive the materialized
+        // table definition-query expansion and produce correct results when the refresh pipeline
+        // runs and the table is queried.
+        final long timeout = Duration.ofSeconds(20).toMillis();
+        final long pause = Duration.ofSeconds(2).toMillis();
+
+        final List<Row> data = new ArrayList<>();
+        // Row.of(order_id, user_id, shop_id, order_created_at)
+        data.add(Row.of(1L, 1L, 3L, "2024-01-01"));
+        data.add(Row.of(2L, 5L, 8L, "2024-01-02"));
+        data.add(Row.of(3L, 0L, 0L, "2024-01-03"));
+        createBoundedValuesSource(data);
+
+        final String materializedTableDDL =
+                "CREATE MATERIALIZED TABLE users_shops"
+                        + " PARTITIONED BY (ds)\n"
+                        + " WITH (\n"
+                        + "   'format' = 'debezium-json'\n"
+                        + " )\n"
+                        + " FRESHNESS = INTERVAL '30' SECOND\n"
+                        + " REFRESH_MODE = CONTINUOUS\n"
+                        + " AS SELECT\n"
+                        + "   user_id,\n"
+                        + "   order_created_at AS ds,\n"
+                        + "   CARDINALITY(ARRAY_FILTER(ARRAY[user_id, shop_id], x -> x > 1))"
+                        + "     AS filtered_cnt,\n"
+                        + "   TRANSFORM(ARRAY[user_id, shop_id], x -> x * 10)[1] AS first_scaled\n"
+                        + " FROM my_source";
+
+        final OperationHandle handle = executeStatement(materializedTableDDL);
+        awaitOperationTermination(service, sessionHandle, handle);
+
+        CommonTestUtils.waitUtil(
+                () ->
+                        fetchTableData(sessionHandle, "SELECT * FROM users_shops").size()
+                                == data.size(),
+                Duration.ofMillis(timeout),
+                Duration.ofMillis(pause),
+                "Failed to verify the data in materialized table.");
+
+        final List<RowData> result =
+                fetchTableData(
+                        sessionHandle,
+                        "SELECT user_id, filtered_cnt, first_scaled FROM users_shops");
+
+        final List<String> actual =
+                result.stream()
+                        .map(r -> r.getLong(0) + "," + r.getInt(1) + "," + r.getLong(2))
+                        .sorted()
+                        .collect(Collectors.toList());
+
+        assertThat(actual)
+                .containsExactly(
+                        // user_id=0: ARRAY[0,0] filtered (>1) -> [] card 0; TRANSFORM[1] = 0*10
+                        "0,0,0",
+                        // user_id=1: ARRAY[1,3] filtered -> [3] card 1; TRANSFORM[1] = 1*10
+                        "1,1,10",
+                        // user_id=5: ARRAY[5,8] filtered -> [5,8] card 2; TRANSFORM[1] = 5*10
+                        "5,2,50");
+    }
+
+    @Test
     void testCreateMaterializedTableInContinuousMode() throws Exception {
         String materializedTableDDL =
                 "CREATE MATERIALIZED TABLE users_shops"

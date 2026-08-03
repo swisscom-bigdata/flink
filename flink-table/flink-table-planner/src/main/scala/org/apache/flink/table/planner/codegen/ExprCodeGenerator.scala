@@ -51,6 +51,7 @@ import org.apache.calcite.sql.`type`.{ReturnTypes, SqlTypeName}
 import org.apache.calcite.sql.{SqlKind, SqlOperator}
 
 import scala.collection.JavaConversions._
+import scala.collection.mutable
 
 /**
  * This code generator is mainly responsible for generating codes for a given calcite [[RexNode]].
@@ -80,6 +81,13 @@ class ExprCodeGenerator(
 
   /** information of the user-defined constructor */
   var functionContextTerm: Option[String] = None
+
+  /**
+   * Bindings of lambda parameter references (by [[RexLambdaRef]] index) to the generated expression
+   * that provides the current value. Populated while generating the body of a higher-order function
+   * such as {@code ARRAY_EXISTS(array, element -> predicate)}.
+   */
+  private val lambdaRefs = mutable.Map[Int, GeneratedExpression]()
 
   /** Bind the input information, should be called before generating expression. */
   def bindInput(
@@ -528,6 +536,15 @@ class ExprCodeGenerator(
         call.getOperands)
     }
 
+    // higher-order functions carry a lambda operand that must be generated inside a loop rather
+    // than as a standalone expression, so they are handled before the generic operand conversion
+    if (call.getOperator == ARRAY_FILTER) {
+      return generateArrayFilter(call)
+    }
+    if (call.getOperator == TRANSFORM) {
+      return generateTransform(call)
+    }
+
     // convert operands and help giving untyped NULL literals a type
     val condIdxs = conditionalOperandIndices(call)
     val operands = call.getOperands.zipWithIndex.map {
@@ -589,6 +606,213 @@ class ExprCodeGenerator(
         operandExpr.literalValue)
   }
 
+  override def visitLambda(var1: RexLambda): GeneratedExpression = {
+    throw new CodeGenException("Lambdas are only supported as arguments of higher-order functions.")
+  }
+
+  override def visitLambdaRef(lambdaRef: RexLambdaRef): GeneratedExpression = {
+    lambdaRefs.getOrElse(
+      lambdaRef.getIndex,
+      throw new CodeGenException(s"Unbound lambda reference: $lambdaRef"))
+  }
+
+  /**
+   * Generates code for {@code ARRAY_FILTER(array, element -> predicate)}. The array operand is
+   * evaluated once, then the predicate body is generated inside a loop where the lambda parameter
+   * is bound to the current element. The result is a new array with the elements for which the
+   * predicate holds. The result is {@code null} if the array itself is {@code null}.
+   */
+  /**
+   * Resolves a lambda operand of a higher-order function. Inside a [[RexProgram]] the lambda is
+   * referenced through a [[RexLocalRef]], so it must be expanded to reach the actual [[RexLambda]].
+   */
+  private def resolveLambda(node: RexNode): RexLambda = node match {
+    case lambda: RexLambda => lambda
+    case localRef: RexLocalRef if rexProgram != null =>
+      resolveLambda(rexProgram.getExprList.get(localRef.getIndex))
+    case _ =>
+      throw new CodeGenException("Expected a lambda expression but got: " + node)
+  }
+
+  private def generateArrayFilter(call: RexCall): GeneratedExpression = {
+    val resultType = FlinkTypeFactory.toLogicalType(call.getType)
+    val array = call.getOperands.get(0).accept(this)
+    val lambda = resolveLambda(call.getOperands.get(1))
+    val paramRef = lambda.getParameters.get(0)
+    val elementType = array.resultType.asInstanceOf[ArrayType].getElementType
+
+    val Seq(resultTerm, nullTerm, idxTerm, elemTerm, elemNullTerm, listTerm) =
+      newNames(
+        ctx,
+        "arrayFilterResult",
+        "arrayFilterIsNull",
+        "arrayFilterIdx",
+        "arrayFilterElem",
+        "arrayFilterElemIsNull",
+        "arrayFilterList")
+    val elemTypeTerm = primitiveTypeTermForType(elementType)
+    val boxedElemTypeTerm = boxedTypeTermForType(elementType)
+    val elemDefault = primitiveDefaultValue(elementType)
+    val readAccess = rowFieldReadAccess(idxTerm, array.resultTerm, elementType)
+    val resultTypeTerm = primitiveTypeTermForType(resultType)
+
+    val elementExpr = GeneratedExpression(elemTerm, elemNullTerm, NO_CODE, elementType)
+    lambdaRefs.put(paramRef.getIndex, elementExpr)
+    val bodyExpr = lambda.getExpression.accept(this)
+    lambdaRefs.remove(paramRef.getIndex)
+
+    val code =
+      s"""
+         |${array.code}
+         |boolean $nullTerm = ${array.nullTerm};
+         |$resultTypeTerm $resultTerm = null;
+         |if (!$nullTerm) {
+         |  java.util.List $listTerm = new java.util.ArrayList();
+         |  for (int $idxTerm = 0; $idxTerm < ${array.resultTerm}.size(); $idxTerm++) {
+         |    boolean $elemNullTerm = ${array.resultTerm}.isNullAt($idxTerm);
+         |    $elemTypeTerm $elemTerm = $elemNullTerm ? $elemDefault : $readAccess;
+         |    ${bodyExpr.code}
+         |    if (!${bodyExpr.nullTerm} && ${bodyExpr.resultTerm}) {
+         |      $listTerm.add($elemNullTerm ? null : ($boxedElemTypeTerm) $elemTerm);
+         |    }
+         |  }
+         |  $resultTerm = new org.apache.flink.table.data.GenericArrayData($listTerm.toArray());
+         |}
+         |""".stripMargin
+    GeneratedExpression(resultTerm, nullTerm, code, resultType)
+  }
+
+  /**
+   * Generates code for {@code TRANSFORM(collection, lambda)} which applies the lambda to every
+   * element of an array or every entry of a map. For arrays the lambda takes a single parameter
+   * (the element); for maps it takes two parameters (key and value). The result is a new array/map
+   * with the transformed values. The result is {@code null} if the collection itself is {@code
+   * null}.
+   */
+  private def generateTransform(call: RexCall): GeneratedExpression = {
+    val collection = call.getOperands.get(0).accept(this)
+    collection.resultType.getTypeRoot match {
+      case LogicalTypeRoot.ARRAY => generateArrayTransform(call, collection)
+      case LogicalTypeRoot.MAP => generateMapTransform(call, collection)
+      case other =>
+        throw new CodeGenException(s"TRANSFORM does not support collection type: $other")
+    }
+  }
+
+  private def generateArrayTransform(
+      call: RexCall,
+      array: GeneratedExpression): GeneratedExpression = {
+    val resultType = FlinkTypeFactory.toLogicalType(call.getType)
+    val lambda = resolveLambda(call.getOperands.get(1))
+    val paramRef = lambda.getParameters.get(0)
+    val elementType = array.resultType.asInstanceOf[ArrayType].getElementType
+    val outElementType = resultType.asInstanceOf[ArrayType].getElementType
+
+    val Seq(resultTerm, nullTerm, idxTerm, elemTerm, elemNullTerm, listTerm) =
+      newNames(
+        ctx,
+        "transformResult",
+        "transformIsNull",
+        "transformIdx",
+        "transformElem",
+        "transformElemIsNull",
+        "transformList")
+    val elemTypeTerm = primitiveTypeTermForType(elementType)
+    val elemDefault = primitiveDefaultValue(elementType)
+    val boxedOutTypeTerm = boxedTypeTermForType(outElementType)
+    val readAccess = rowFieldReadAccess(idxTerm, array.resultTerm, elementType)
+    val resultTypeTerm = primitiveTypeTermForType(resultType)
+
+    val elementExpr = GeneratedExpression(elemTerm, elemNullTerm, NO_CODE, elementType)
+    lambdaRefs.put(paramRef.getIndex, elementExpr)
+    val bodyExpr = lambda.getExpression.accept(this)
+    lambdaRefs.remove(paramRef.getIndex)
+
+    val code =
+      s"""
+         |${array.code}
+         |boolean $nullTerm = ${array.nullTerm};
+         |$resultTypeTerm $resultTerm = null;
+         |if (!$nullTerm) {
+         |  java.util.List $listTerm = new java.util.ArrayList();
+         |  for (int $idxTerm = 0; $idxTerm < ${array.resultTerm}.size(); $idxTerm++) {
+         |    boolean $elemNullTerm = ${array.resultTerm}.isNullAt($idxTerm);
+         |    $elemTypeTerm $elemTerm = $elemNullTerm ? $elemDefault : $readAccess;
+         |    ${bodyExpr.code}
+         |    $listTerm.add(${bodyExpr.nullTerm} ? null : ($boxedOutTypeTerm) ${bodyExpr.resultTerm});
+         |  }
+         |  $resultTerm = new org.apache.flink.table.data.GenericArrayData($listTerm.toArray());
+         |}
+         |""".stripMargin
+    GeneratedExpression(resultTerm, nullTerm, code, resultType)
+  }
+
+  private def generateMapTransform(call: RexCall, map: GeneratedExpression): GeneratedExpression = {
+    val resultType = FlinkTypeFactory.toLogicalType(call.getType)
+    val lambda = resolveLambda(call.getOperands.get(1))
+    val keyParamRef = lambda.getParameters.get(0)
+    val valueParamRef = lambda.getParameters.get(1)
+    val mapType = map.resultType.asInstanceOf[MapType]
+    val keyType = mapType.getKeyType
+    val valueType = mapType.getValueType
+    val outValueType = resultType.asInstanceOf[MapType].getValueType
+
+    val Seq(resultTerm, nullTerm, idxTerm, keysTerm, valuesTerm, hashTerm) =
+      newNames(
+        ctx,
+        "transformResult",
+        "transformIsNull",
+        "transformIdx",
+        "transformKeys",
+        "transformValues",
+        "transformMap")
+    val Seq(keyTerm, keyNullTerm, valueTerm, valueNullTerm) =
+      newNames(ctx, "transformKey", "transformKeyIsNull", "transformValue", "transformValueIsNull")
+
+    val keyTypeTerm = primitiveTypeTermForType(keyType)
+    val valueTypeTerm = primitiveTypeTermForType(valueType)
+    val keyDefault = primitiveDefaultValue(keyType)
+    val valueDefault = primitiveDefaultValue(valueType)
+    val boxedKeyTypeTerm = boxedTypeTermForType(keyType)
+    val boxedOutValueTypeTerm = boxedTypeTermForType(outValueType)
+    val keyReadAccess = rowFieldReadAccess(idxTerm, keysTerm, keyType)
+    val valueReadAccess = rowFieldReadAccess(idxTerm, valuesTerm, valueType)
+    val resultTypeTerm = primitiveTypeTermForType(resultType)
+    val arrayDataTerm = className[org.apache.flink.table.data.ArrayData]
+
+    val keyExpr = GeneratedExpression(keyTerm, keyNullTerm, NO_CODE, keyType)
+    val valueExpr = GeneratedExpression(valueTerm, valueNullTerm, NO_CODE, valueType)
+    lambdaRefs.put(keyParamRef.getIndex, keyExpr)
+    lambdaRefs.put(valueParamRef.getIndex, valueExpr)
+    val bodyExpr = lambda.getExpression.accept(this)
+    lambdaRefs.remove(keyParamRef.getIndex)
+    lambdaRefs.remove(valueParamRef.getIndex)
+
+    val code =
+      s"""
+         |${map.code}
+         |boolean $nullTerm = ${map.nullTerm};
+         |$resultTypeTerm $resultTerm = null;
+         |if (!$nullTerm) {
+         |  $arrayDataTerm $keysTerm = ${map.resultTerm}.keyArray();
+         |  $arrayDataTerm $valuesTerm = ${map.resultTerm}.valueArray();
+         |  java.util.Map $hashTerm = new java.util.HashMap();
+         |  for (int $idxTerm = 0; $idxTerm < ${map.resultTerm}.size(); $idxTerm++) {
+         |    boolean $keyNullTerm = $keysTerm.isNullAt($idxTerm);
+         |    $keyTypeTerm $keyTerm = $keyNullTerm ? $keyDefault : $keyReadAccess;
+         |    boolean $valueNullTerm = $valuesTerm.isNullAt($idxTerm);
+         |    $valueTypeTerm $valueTerm = $valueNullTerm ? $valueDefault : $valueReadAccess;
+         |    ${bodyExpr.code}
+         |    $hashTerm.put(
+         |      $keyNullTerm ? null : ($boxedKeyTypeTerm) $keyTerm,
+         |      ${bodyExpr.nullTerm} ? null : ($boxedOutValueTypeTerm) ${bodyExpr.resultTerm});
+         |  }
+         |  $resultTerm = new org.apache.flink.table.data.GenericMapData($hashTerm);
+         |}
+         |""".stripMargin
+    GeneratedExpression(resultTerm, nullTerm, code, resultType)
+  }
+
   override def visitOver(over: RexOver): GeneratedExpression =
     throw new CodeGenException("Aggregate functions over windows are not supported yet.")
 
@@ -597,14 +821,6 @@ class ExprCodeGenerator(
 
   override def visitPatternFieldRef(fieldRef: RexPatternFieldRef): GeneratedExpression =
     throw new CodeGenException("Pattern field references are not supported yet.")
-
-  override def visitLambda(var1: RexLambda): GeneratedExpression = {
-    throw new CodeGenException("Lambdas are not supported yet.")
-  }
-
-  override def visitLambdaRef(var1: RexLambdaRef): GeneratedExpression = {
-    throw new CodeGenException("Lambda references are not supported yet.")
-  }
 
   // ----------------------------------------------------------------------------------------
 

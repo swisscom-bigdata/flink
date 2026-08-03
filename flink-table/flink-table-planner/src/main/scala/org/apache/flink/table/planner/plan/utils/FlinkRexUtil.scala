@@ -428,6 +428,20 @@ object FlinkRexUtil {
         s"$referenceExpr.$field"
       case cv: RexCorrelVariable =>
         cv.toString
+      case lambda: RexLambda =>
+        val params = lambda.getParameters.map(
+          getExpressionString(_, inFields, localExprsTable, expressionFormat, expressionDetail))
+        val body = getExpressionString(
+          lambda.getExpression,
+          inFields,
+          localExprsTable,
+          expressionFormat,
+          expressionDetail)
+        val paramStr =
+          if (params.size() == 1) params.head else s"(${params.mkString(", ")})"
+        s"$paramStr -> $body"
+      case lambdaRef: RexLambdaRef =>
+        lambdaRef.getName
       case _ =>
         throw new IllegalArgumentException(s"Unknown expression type '${expr.getClass}': $expr")
     }

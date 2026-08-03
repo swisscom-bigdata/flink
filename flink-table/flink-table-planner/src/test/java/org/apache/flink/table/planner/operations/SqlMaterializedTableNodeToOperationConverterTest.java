@@ -308,6 +308,38 @@ class SqlMaterializedTableNodeToOperationConverterTest
     }
 
     @Test
+    void testCreateMaterializedTableWithLambdaQuery() {
+        // A materialized table, like a view, persists the *expanded* definition query and
+        // re-plans it on refresh. This verifies that higher-order function lambdas survive the
+        // expand/re-unparse round-trip instead of being lost or corrupted.
+        final String sql =
+                "CREATE MATERIALIZED TABLE mtbl1 (\n"
+                        + "   CONSTRAINT ct1 PRIMARY KEY(a) NOT ENFORCED"
+                        + ")\n"
+                        + "COMMENT 'materialized table comment'\n"
+                        + "PARTITIONED BY (a)\n"
+                        + "WITH (\n"
+                        + "  'connector' = 'filesystem', \n"
+                        + "  'format' = 'json'\n"
+                        + ")\n"
+                        + "FRESHNESS = INTERVAL '30' SECOND\n"
+                        + "REFRESH_MODE = FULL\n"
+                        + "AS SELECT a, ARRAY_FILTER(ARRAY[a, CAST(c AS BIGINT)], x -> x > 0) AS f "
+                        + "FROM t1";
+
+        final CreateMaterializedTableOperation createOperation =
+                createMaterializedTableOperation(sql);
+
+        final String expandedQuery =
+                createOperation.getCatalogMaterializedTable().getExpandedQuery();
+
+        assertThat(expandedQuery)
+                .contains("ARRAY_FILTER")
+                .contains("->")
+                .contains("`builtin`.`default`.`t1`");
+    }
+
+    @Test
     void testCreateMaterializedTableWithUDTFQuery() {
         functionCatalog.registerCatalogFunction(
                 UnresolvedIdentifier.of(

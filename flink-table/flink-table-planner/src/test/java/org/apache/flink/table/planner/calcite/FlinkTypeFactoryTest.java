@@ -31,6 +31,7 @@ import org.apache.flink.table.types.logical.DateType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -85,6 +86,7 @@ class FlinkTypeFactoryTest {
                 new ArrayType(new DoubleType()),
                 new MapType(new DoubleType(), VarCharType.STRING_TYPE),
                 RowType.of(new DoubleType(), VarCharType.STRING_TYPE),
+                new FunctionType(Arrays.asList(new IntType(), new BigIntType()), new BooleanType()),
                 new RawType<>(
                         DayOfWeek.class,
                         new KryoSerializer<>(DayOfWeek.class, new SerializerConfigImpl())));
@@ -135,6 +137,28 @@ class FlinkTypeFactoryTest {
                         FlinkTypeFactory.toLogicalType(
                                 typeFactory.createFieldTypeFromLogicalType(logicalType.copy(true))))
                 .isEqualTo(logicalType.copy(true));
+    }
+
+    @Test
+    void testFunctionType() {
+        final FlinkTypeFactory typeFactory =
+                new FlinkTypeFactory(
+                        Thread.currentThread().getContextClassLoader(), FlinkTypeSystem.INSTANCE);
+
+        final LogicalType functionType =
+                new FunctionType(Arrays.asList(new IntType(), new BigIntType()), new BooleanType());
+
+        // the way the type is rendered in query plans (e.g. EXPLAIN output)
+        final RelDataType relDataType =
+                typeFactory.createFieldTypeFromLogicalType(functionType.copy(true));
+        assertThat(relDataType.getFullTypeString()).contains("FUNCTION<(INT, BIGINT) -> BOOLEAN>");
+
+        // nullability is preserved during the RelDataType roundtrip
+        final RelDataType notNullRelDataType =
+                typeFactory.createFieldTypeFromLogicalType(functionType.copy(false));
+        assertThat(notNullRelDataType.isNullable()).isFalse();
+        assertThat(FlinkTypeFactory.toLogicalType(notNullRelDataType))
+                .isEqualTo(functionType.copy(false));
     }
 
     @Test

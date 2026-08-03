@@ -27,6 +27,7 @@ import org.apache.flink.table.planner.plan.type.FlinkReturnTypes;
 import org.apache.flink.table.planner.plan.type.NumericExceptFirstOperandChecker;
 
 import org.apache.calcite.sql.SqlAggFunction;
+import org.apache.calcite.sql.SqlBasicFunction;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlGroupedWindowFunction;
@@ -1192,6 +1193,27 @@ public class FlinkSqlOperatorTable extends ReflectiveSqlOperatorTable {
     public static final SqlFunction CAST = SqlStdOperatorTable.CAST;
     public static final SqlOperator SCALAR_QUERY = SqlStdOperatorTable.SCALAR_QUERY;
     public static final SqlOperator EXISTS = SqlStdOperatorTable.EXISTS;
+
+    /**
+     * Higher-order function {@code ARRAY_FILTER(array, element -> predicate)} that returns a new
+     * array containing only the elements for which the predicate holds. The predicate is expressed
+     * as a lambda (a value of the {@code FUNCTION} type) whose single parameter is bound to the
+     * array element type. Reuses Calcite's lambda operand type inference from {@link
+     * OperandTypes#EXISTS}.
+     */
+    public static final SqlFunction ARRAY_FILTER =
+            SqlBasicFunction.create(
+                    "ARRAY_FILTER",
+                    ReturnTypes.ARG0,
+                    OperandTypes.EXISTS,
+                    SqlFunctionCategory.SYSTEM);
+
+    /**
+     * Higher-order function {@code TRANSFORM(collection, lambda)} that applies a lambda to every
+     * element of an array or every entry of a map.
+     */
+    public static final SqlFunction TRANSFORM = new SqlTransformFunction();
+
     public static final SqlFunction SIN = SqlStdOperatorTable.SIN;
     public static final SqlFunction COS = SqlStdOperatorTable.COS;
     public static final SqlFunction TAN = SqlStdOperatorTable.TAN;

@@ -40,6 +40,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DistinctType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -627,6 +628,25 @@ public class LogicalTypesTest {
                                 new Class[] {Bitmap.class, RoaringBitmapData.class},
                                 new LogicalType[] {},
                                 new BitmapType(false)));
+    }
+
+    @Test
+    void testFunctionType() {
+        final FunctionType functionType =
+                new FunctionType(Collections.singletonList(new IntType()), new BooleanType());
+
+        assertThat(functionType)
+                .isJavaSerializable()
+                .satisfies(
+                        baseAssertions(
+                                "FUNCTION<(INT) -> BOOLEAN>",
+                                "FUNCTION<(INT) -> BOOLEAN>",
+                                new Class[] {java.util.function.Function.class},
+                                new Class[] {java.util.function.Function.class},
+                                new LogicalType[] {new IntType(), new BooleanType()},
+                                new FunctionType(
+                                        Collections.singletonList(new BigIntType()),
+                                        new BooleanType())));
     }
 
     @Test
