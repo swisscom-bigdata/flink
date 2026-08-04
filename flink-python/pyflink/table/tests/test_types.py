@@ -128,6 +128,18 @@ class UTCOffsetTimezone(datetime.tzinfo):
 
 class TypesTests(PyFlinkTestCase):
 
+    def test_row_type_repr_includes_nullability(self):
+        row_type = RowType([RowField("id", BigIntType())])
+
+        self.assertEqual(
+            "RowType(RowField(id, BigIntType(true), ...), true)",
+            repr(row_type),
+        )
+        self.assertEqual(
+            "RowType(RowField(id, BigIntType(true), ...), false)",
+            repr(row_type.not_null()),
+        )
+
     def test_infer_schema(self):
         from decimal import Decimal
 
@@ -170,14 +182,14 @@ class TypesTests(PyFlinkTestCase):
             'DoubleType(true)',
             "ArrayType(DoubleType(false), true)",
             "ArrayType(BigIntType(true), true)",
-            'RowType(RowField(_1, BigIntType(true), ...))',
-            'RowType(RowField(x, DoubleType(true), ...),RowField(y, DoubleType(true), ...))',
+            'RowType(RowField(_1, BigIntType(true), ...), true)',
+            'RowType(RowField(x, DoubleType(true), ...),RowField(y, DoubleType(true), ...), true)',
             'MapType(VarCharType(2147483647, false), BigIntType(true), true)',
             'VarBinaryType(2147483647, true)',
             'DecimalType(38, 18, true)',
-            'RowType(RowField(a, BigIntType(true), ...))',
-            'RowType(RowField(a, BigIntType(true), ...))',
-            'RowType(RowField(a, BigIntType(true), ...))',
+            'RowType(RowField(a, BigIntType(true), ...), true)',
+            'RowType(RowField(a, BigIntType(true), ...), true)',
+            'RowType(RowField(a, BigIntType(true), ...), true)',
         ]
 
         schema = _infer_schema_from_data([data])
@@ -208,6 +220,11 @@ class TypesTests(PyFlinkTestCase):
 
         # third column is varchar
         self.assertTrue(isinstance(schema.fields[2].data_type, VarCharType))
+
+    def test_infer_array_type_with_leading_none(self):
+        data_type = _infer_type([None, 1])
+        self.assertTrue(isinstance(data_type, ArrayType))
+        self.assertTrue(isinstance(data_type.element_type, BigIntType))
 
     def test_infer_schema_not_enough_names(self):
         schema = _infer_schema_from_data([["a", "b"]], ["col1"])

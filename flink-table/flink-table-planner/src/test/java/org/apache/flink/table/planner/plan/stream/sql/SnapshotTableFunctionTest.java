@@ -19,11 +19,11 @@
 package org.apache.flink.table.planner.plan.stream.sql;
 
 import org.apache.flink.table.api.TableConfig;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.planner.utils.TableTestBase;
 import org.apache.flink.table.planner.utils.TableTestUtil;
 
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
@@ -120,9 +120,6 @@ public class SnapshotTableFunctionTest extends TableTestBase {
     }
 
     @Test
-    @Disabled(
-            "SNAPSHOT sets disableSystemArguments(true), but that flag is currently not enforced. "
-                    + "Re-enable once FLINK-40079 is fixed.")
     void testSystemArgumentsNotAllowed() {
         // SNAPSHOT disables the implicit system arguments (e.g. `on_time`). Passing one in a
         // LATERAL context must be rejected because the argument is not part of the function
@@ -135,7 +132,10 @@ public class SnapshotTableFunctionTest extends TableTestBase {
                                                 + "input => TABLE Rates, "
                                                 + "on_time => DESCRIPTOR(rate_time))) AS r "
                                                 + "WHERE o.currency = r.currency"))
-                .satisfies(anyCauseMatches("on_time"));
+                .satisfies(
+                        anyCauseMatches(
+                                "The 'on_time' argument is not supported because function "
+                                        + "'SNAPSHOT' does not use system arguments."));
     }
 
     @Test
@@ -153,13 +153,14 @@ public class SnapshotTableFunctionTest extends TableTestBase {
 
     @Test
     void testFromContextRejectedOutsideLateral() {
-        // SNAPSHOT used outside a LATERAL context is not rewritten by the LATERAL SNAPSHOT rule and
-        // reaches the regular PTF physical rule. Because SNAPSHOT disables system arguments, that
-        // rule rejects it. FLINK-39784 will replace this with a clearer message
-        // ("SNAPSHOT can only be used inside a LATERAL clause").
+        // SNAPSHOT used outside a LATERAL context is not rewritten by the LATERAL SNAPSHOT rule.
+        // ForbidSnapshotOutsideLateralRule intercepts the surviving SNAPSHOT scan and rejects it
+        // with a clear message before it reaches the generic PTF translation.
         assertThatThrownBy(() -> util.verifyRelPlan("SELECT * FROM SNAPSHOT(input => TABLE Rates)"))
                 .satisfies(
                         anyCauseMatches(
-                                "Disabling system arguments is not supported for user-defined PTF."));
+                                ValidationException.class,
+                                "The SNAPSHOT function can only be used as the build side "
+                                        + "(right-hand side) of a LATERAL join"));
     }
 }
