@@ -21,11 +21,13 @@ package org.apache.flink.table.planner.runtime.batch.sql;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
+import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CollectionUtil;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.List;
 import java.util.Map;
@@ -42,6 +44,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * verifies that lambda expressions survive the expand/rewrite round-trip.
  */
 class HigherOrderFunctionITCase {
+
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_EXTENSION = new MiniClusterExtension();
 
     private TableEnvironment tEnv;
 
