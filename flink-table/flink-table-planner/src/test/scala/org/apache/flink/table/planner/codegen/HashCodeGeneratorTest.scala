@@ -19,7 +19,7 @@ package org.apache.flink.table.planner.codegen
 
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.table.data.{GenericArrayData, GenericMapData, GenericRowData, StringData}
-import org.apache.flink.table.types.logical.{ArrayType, BigIntType, IntType, MapType, MultisetType, RowType, VarBinaryType, VarCharType}
+import org.apache.flink.table.types.logical.{ArrayType, BigIntType, DoubleType, FloatType, IntType, MapType, MultisetType, RowType, VarBinaryType, VarCharType}
 
 import org.junit.jupiter.api.Assertions.{assertEquals, assertNotEquals}
 import org.junit.jupiter.api.Test
@@ -210,11 +210,78 @@ class HashCodeGeneratorTest {
     assertEquals(hashFunctionCode1, hashFunctionCode2)
   }
 
+  @Test
+  def testFloatingSignedZeroHash(): Unit = {
+    // 0.0 and -0.0 are equal under SQL equality (primitive ==), so their generated logical hashes
+    // must agree even though Float/Double#hashCode differ for the two signed zeros. See the FLOAT
+    // and DOUBLE cases in CodeGenUtils#hashCodeForType.
+    val floatHash = HashCodeGenerator
+      .generateRowHash(
+        new CodeGeneratorContext(new Configuration, classLoader),
+        RowType.of(new FloatType()),
+        "name",
+        Array(0))
+      .newInstance(classLoader)
+    assertEquals(
+      floatHash.hashCode(GenericRowData.of(jf(0.0f))),
+      floatHash.hashCode(GenericRowData.of(jf(-0.0f))))
+
+    val doubleHash = HashCodeGenerator
+      .generateRowHash(
+        new CodeGeneratorContext(new Configuration, classLoader),
+        RowType.of(new DoubleType()),
+        "name",
+        Array(0))
+      .newInstance(classLoader)
+    assertEquals(
+      doubleHash.hashCode(GenericRowData.of(jd(0.0d))),
+      doubleHash.hashCode(GenericRowData.of(jd(-0.0d))))
+
+    // the same normalization must apply to a signed-zero leaf nested inside an array ...
+    val arrayHash = HashCodeGenerator
+      .generateArrayHash(
+        new CodeGeneratorContext(new Configuration, classLoader),
+        new DoubleType(),
+        "name")
+      .newInstance(classLoader)
+    assertEquals(
+      arrayHash.hashCode(new GenericArrayData(Array(0.0d, 1.0d))),
+      arrayHash.hashCode(new GenericArrayData(Array(-0.0d, 1.0d))))
+
+    // ... and inside a row
+    val rowHash = HashCodeGenerator
+      .generateRowHash(
+        new CodeGeneratorContext(new Configuration, classLoader),
+        RowType.of(new DoubleType(), new IntType()),
+        "name",
+        Array(0, 1))
+      .newInstance(classLoader)
+    assertEquals(
+      rowHash.hashCode(GenericRowData.of(jd(0.0d), ji(7))),
+      rowHash.hashCode(GenericRowData.of(jd(-0.0d), ji(7))))
+
+    // NaN: SQL equality treats NaN as unequal to itself (primitive ==), so equal hashes are not
+    // required. This pins the current contract: distinct NaN bit patterns still hash identically
+    // because Double#hashCode canonicalizes NaN via doubleToLongBits.
+    val nonCanonicalNaN = java.lang.Double.longBitsToDouble(0x7ff8000000000001L)
+    assertEquals(
+      doubleHash.hashCode(GenericRowData.of(jd(Double.NaN))),
+      doubleHash.hashCode(GenericRowData.of(jd(nonCanonicalNaN))))
+  }
+
   def ji(i: Int): Integer = {
     new Integer(i)
   }
 
   def jl(l: Long): java.lang.Long = {
     new java.lang.Long(l)
+  }
+
+  def jf(f: Float): java.lang.Float = {
+    java.lang.Float.valueOf(f)
+  }
+
+  def jd(d: Double): java.lang.Double = {
+    java.lang.Double.valueOf(d)
   }
 }
