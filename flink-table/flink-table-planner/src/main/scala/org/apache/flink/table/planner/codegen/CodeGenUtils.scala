@@ -344,8 +344,15 @@ object CodeGenUtils {
       case INTEGER | DATE | TIME_WITHOUT_TIME_ZONE | INTERVAL_YEAR_MONTH =>
         s"${className[JInt]}.hashCode($term)"
       case BIGINT | INTERVAL_DAY_TIME => s"${className[JLong]}.hashCode($term)"
-      case FLOAT => s"${className[JFloat]}.hashCode($term)"
-      case DOUBLE => s"${className[JDouble]}.hashCode($term)"
+      case FLOAT =>
+        // Signed zero: 0.0f == -0.0f in SQL (primitive ==), so their hashes must agree.
+        // Float.hashCode(-0.0f) differs from Float.hashCode(0.0f), so normalize both to 0.
+        // NaN takes the default path (NaN == 0.0f is false); NaN is unequal to itself under SQL
+        // equality, so its hash is unconstrained.
+        s"($term == 0.0f ? 0 : ${className[JFloat]}.hashCode($term))"
+      case DOUBLE =>
+        // See FLOAT: normalize signed zero so 0.0d and -0.0d hash identically.
+        s"($term == 0.0d ? 0 : ${className[JDouble]}.hashCode($term))"
       case TIMESTAMP_WITHOUT_TIME_ZONE | TIMESTAMP_WITH_LOCAL_TIME_ZONE =>
         s"$term.hashCode()"
       case TIMESTAMP_WITH_TIME_ZONE =>
