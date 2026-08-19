@@ -280,9 +280,10 @@ public class FlinkTypeFactory extends JavaTypeFactoryImpl implements ExtendedRel
             return Optional.of(createTypeWithNullability(head, nullable));
         } else {
             // types are not all the same
-            if (types.stream().anyMatch(t -> t.getSqlTypeName() == SqlTypeName.ANY)) {
-                // one of the type was RAW.
-                // we cannot generate a common type if it differs from other types.
+            if (types.stream().anyMatch(t -> t instanceof GenericRelDataType)) {
+                // one of the types is a generic RAW type (mapped to SqlTypeName.ANY). We cannot
+                // generate a common type if it differs from the other types, so keep failing fast
+                // instead of silently producing an untyped ANY column.
                 throw new TableException("Generic RAW types must have a common type information.");
             } else {
                 // cannot resolve a common type for different input types
