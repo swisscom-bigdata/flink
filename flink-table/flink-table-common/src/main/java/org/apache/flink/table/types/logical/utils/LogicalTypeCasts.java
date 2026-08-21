@@ -63,6 +63,7 @@ import static org.apache.flink.table.types.logical.LogicalTypeRoot.DECIMAL;
 import static org.apache.flink.table.types.logical.LogicalTypeRoot.DISTINCT_TYPE;
 import static org.apache.flink.table.types.logical.LogicalTypeRoot.DOUBLE;
 import static org.apache.flink.table.types.logical.LogicalTypeRoot.FLOAT;
+import static org.apache.flink.table.types.logical.LogicalTypeRoot.FUNCTION;
 import static org.apache.flink.table.types.logical.LogicalTypeRoot.INTEGER;
 import static org.apache.flink.table.types.logical.LogicalTypeRoot.INTERVAL_DAY_TIME;
 import static org.apache.flink.table.types.logical.LogicalTypeRoot.INTERVAL_YEAR_MONTH;
@@ -637,7 +638,13 @@ public final class LogicalTypeCasts {
         final LogicalTypeRoot sourceRoot = sourceType.getTypeRoot();
         final LogicalTypeRoot targetRoot = targetType.getTypeRoot();
 
-        if (sourceRoot == NULL) {
+        if (sourceRoot == FUNCTION || targetRoot == FUNCTION) {
+            // the two function types are not equal (from initial invariant), i.e. they differ in
+            // the number of parameters; a lambda is never materialized as a runtime value, so it
+            // can neither be converted into a function type of a different arity nor into or from
+            // any other type, and it can never be NULL
+            return false;
+        } else if (sourceRoot == NULL) {
             // null can be cast to an arbitrary type
             return true;
         } else if (sourceRoot == DISTINCT_TYPE && targetRoot == DISTINCT_TYPE) {

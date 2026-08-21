@@ -41,6 +41,7 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexFieldAccess;
+import org.apache.calcite.rex.RexLambda;
 import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
@@ -177,6 +178,11 @@ public final class ShortcutUtils {
         return functionDefinition != null && functionDefinition.getKind() == kind;
     }
 
+    /**
+     * Whether the given node is deterministic, resolving {@link RexLocalRef}s against the
+     * expression list of the enclosing {@link org.apache.calcite.rex.RexProgram}. Falls back to
+     * {@link RexUtil#isDeterministic(RexNode)} if there is no such program.
+     */
     public static boolean isDeterministicThroughProgram(
             RexNode node, @Nullable List<RexNode> exprs) {
         if (exprs == null) {
@@ -198,6 +204,11 @@ public final class ShortcutUtils {
                 }
             }
             return true;
+        }
+        if (node instanceof RexLambda) {
+            // the body of a higher-order function's lambda is not an operand of the enclosing call
+            return isDeterministicThroughProgram(
+                    ((RexLambda) node).getExpression(), exprs, visited);
         }
         if (node instanceof RexLocalRef) {
             final int idx = ((RexLocalRef) node).getIndex();

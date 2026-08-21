@@ -25,9 +25,12 @@ import org.apache.flink.table.functions.FunctionRequirement;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.functions.SpecializedFunction.SpecializedContext;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.inference.ArgumentTypeStrategy;
 import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.InputTypeStrategies;
 import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.inference.TypeStrategies;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.utils.DataTypeUtils;
 import org.apache.flink.util.Preconditions;
 
@@ -90,10 +93,26 @@ public abstract class BuiltInScalarFunction extends ScalarFunction {
 
     @Override
     public TypeInference getTypeInference(DataTypeFactory typeFactory) {
-        return TypeInference.newBuilder()
-                .typedArguments(getArgumentDataTypes())
-                .outputTypeStrategy(TypeStrategies.explicit(getOutputDataType()))
-                .build();
+        final List<DataType> arguments = getArgumentDataTypes();
+        final TypeInference.Builder builder =
+                TypeInference.newBuilder()
+                        .outputTypeStrategy(TypeStrategies.explicit(getOutputDataType()));
+        if (arguments.stream().anyMatch(t -> t.getLogicalType().is(LogicalTypeRoot.FUNCTION))) {
+            // A static signature rejects lambda arguments because their parameter types have to be
+            // derived from a sibling argument rather than declared up front. That derivation has
+            // already happened for a specialized function: the types below are the resolved ones of
+            // this very call, so they are restated as an input type strategy instead. This also
+            // carries the lambda argument's representation, which is what hands the function object
+            // internal data.
+            builder.inputTypeStrategy(
+                    InputTypeStrategies.sequence(
+                            arguments.stream()
+                                    .map(InputTypeStrategies::explicit)
+                                    .toArray(ArgumentTypeStrategy[]::new)));
+        } else {
+            builder.typedArguments(arguments);
+        }
+        return builder.build();
     }
 
     @Override

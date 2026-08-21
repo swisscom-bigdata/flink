@@ -44,6 +44,11 @@ public class CalcRestoreTest extends RestoreTestBase {
                 CalcTestPrograms.CALC_UDF_COMPLEX,
                 CalcTestPrograms.CALC_CURRENT_TIMESTAMP,
                 CalcTestPrograms.COALESCE,
-                CalcTestPrograms.CALC_VARIANT);
+                CalcTestPrograms.CALC_VARIANT,
+                CalcTestPrograms.CALC_ARRAY_TRANSFORM,
+                CalcTestPrograms.CALC_ARRAY_FILTER,
+                CalcTestPrograms.CALC_ARRAY_REDUCE,
+                CalcTestPrograms.CALC_ARRAY_ZIP_WITH,
+                CalcTestPrograms.CALC_ARRAY_TRANSFORM_CAPTURE);
     }
 }

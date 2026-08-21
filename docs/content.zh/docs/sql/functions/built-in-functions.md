@@ -70,6 +70,49 @@ Flink Table API & SQL 为用户提供了一组内置的数据转换函数。本�
 
 {{< sql_functions_zh "collection" >}}
 
+### 高阶函数
+
+高阶函数（higher-order function）接收一个 *lambda 表达式* 作为参数，并把它应用到 `ARRAY` 的元素或
+`MAP` 的键值对上。
+
+lambda 是一个匿名函数，写作 `parameter -> body`（多个参数时写作 `(parameter1, parameter2) -> body`）。
+它的参数类型由所应用的集合推导得出，因此无需声明：
+
+```sql
+SELECT ARRAY_TRANSFORM(vals, x -> x * 10) FROM t;   -- x 绑定到 vals 的元素类型
+```
+
+同一个 lambda 的参数名必须唯一。嵌套的 lambda 可以复用外层 lambda 的参数名，此时会遮蔽外层参数。
+
+lambda 的函数体是一个普通表达式：除了自己的参数以外，它还可以引用（*捕获*）外层查询的任意列，也可以调用
+内置函数或自定义函数，包括其它高阶函数。嵌套的 lambda 可以捕获外层 lambda 的参数：
+
+```sql
+-- 捕获列 `base`
+SELECT ARRAY_TRANSFORM(vals, x -> x + base) FROM t;
+
+-- 嵌套：内层 lambda 捕获了外层 lambda 的参数 `a`
+SELECT ARRAY_TRANSFORM(nested_vals, a -> ARRAY_FILTER(a, x -> x > a[1])) FROM t;
+```
+
+函数体可以捕获外层查询为当前行产生的任意值，包括聚合函数、`OVER` 窗口和子查询——它们各自按行或按组
+计算一次，函数体看到的是其结果：
+
+```sql
+SELECT ARRAY_TRANSFORM(vals, x -> x + SUM(base)) FROM t GROUP BY vals;
+SELECT ARRAY_TRANSFORM(vals, x -> x + SUM(base) OVER ()) FROM t;
+SELECT ARRAY_TRANSFORM(vals, x -> x + (SELECT MAX(base) FROM t)) FROM t;
+```
+
+但这些构造不能作用于 lambda 的*参数*：参数是单个元素而不是一组行，因此
+`ARRAY_TRANSFORM(vals, x -> SUM(x))` 会导致校验错误。若要折叠数组自身的元素，请使用 `ARRAY_REDUCE`。
+表函数同样不能出现在函数体中，因为它产生的是行而不是值；异步标量函数也不能，因为它的结果在函数体求值完成之后才会返回。
+
+lambda 只能作为高阶函数的参数使用，用在其它位置会导致校验错误。lambda 不是值：它不能存储在列中，
+不能赋值给变量，也不能作为查询结果返回。
+
+{{< sql_functions_zh "higherorder" >}}
+
 ### JSON 函数
 
 JSON 函数使用符合 ISO/IEC TR 19075-6 SQL标准的 JSON 路径表达式。 它们的语法受到 ECMAScript 的启发，并

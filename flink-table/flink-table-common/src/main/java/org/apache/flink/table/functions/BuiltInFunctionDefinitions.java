@@ -106,7 +106,11 @@ import static org.apache.flink.table.types.inference.TypeStrategies.nullableIfAl
 import static org.apache.flink.table.types.inference.TypeStrategies.nullableIfArgs;
 import static org.apache.flink.table.types.inference.TypeStrategies.varyingString;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_ELEMENT_ARG;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_FILTER_INPUT;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_FULLY_COMPARABLE;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_REDUCE_INPUT;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_TRANSFORM_INPUT;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ARRAY_ZIP_WITH_INPUT;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.FROM_CHANGELOG_INPUT_TYPE_STRATEGY;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.INDEX;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.JSON_ARGUMENT;
@@ -360,6 +364,46 @@ public final class BuiltInFunctionDefinitions {
                     .outputTypeStrategy(nullableIfArgs(argument(0)))
                     .runtimeClass(
                             "org.apache.flink.table.runtime.functions.scalar.ArrayReverseFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition ARRAY_TRANSFORM =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("ARRAY_TRANSFORM")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(ARRAY_TRANSFORM_INPUT)
+                    .outputTypeStrategy(SpecificTypeStrategies.ARRAY_TRANSFORM)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ArrayTransformFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition ARRAY_FILTER =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("ARRAY_FILTER")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(ARRAY_FILTER_INPUT)
+                    .outputTypeStrategy(nullableIfArgs(ConstantArgumentCount.of(0), argument(0)))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ArrayFilterFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition ARRAY_REDUCE =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("ARRAY_REDUCE")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(ARRAY_REDUCE_INPUT)
+                    .outputTypeStrategy(SpecificTypeStrategies.ARRAY_REDUCE)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ArrayReduceFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition ARRAY_ZIP_WITH =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("ARRAY_ZIP_WITH")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(ARRAY_ZIP_WITH_INPUT)
+                    .outputTypeStrategy(SpecificTypeStrategies.ARRAY_ZIP_WITH)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ArrayZipWithFunction")
                     .build();
 
     public static final BuiltInFunctionDefinition ARRAY_SLICE =

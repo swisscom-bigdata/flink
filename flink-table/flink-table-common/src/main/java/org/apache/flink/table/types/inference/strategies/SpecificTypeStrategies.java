@@ -24,6 +24,7 @@ import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.types.CollectionDataType;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.KeyValueDataType;
+import org.apache.flink.table.types.inference.ConstantArgumentCount;
 import org.apache.flink.table.types.inference.TypeStrategies;
 import org.apache.flink.table.types.inference.TypeStrategy;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
@@ -186,6 +187,59 @@ public final class SpecificTypeStrategies {
                 } else {
                     return Optional.of(arg0.nullable());
                 }
+            };
+
+    /**
+     * Type strategy specific for {@link BuiltInFunctionDefinitions#ARRAY_TRANSFORM}. The result is
+     * an array whose element type is the result type of the lambda (the second argument). The array
+     * is nullable if the input array is nullable.
+     */
+    public static final TypeStrategy ARRAY_TRANSFORM =
+            TypeStrategies.nullableIfArgs(
+                    ConstantArgumentCount.of(0),
+                    callContext -> {
+                        final org.apache.flink.table.types.logical.LogicalType lambdaResultType =
+                                LambdaStrategyUtils.requireLambdaResultType(callContext, 1);
+                        return Optional.of(DataTypes.ARRAY(DataTypes.of(lambdaResultType)));
+                    });
+
+    /**
+     * Type strategy specific for {@link BuiltInFunctionDefinitions#ARRAY_REDUCE}. The result is the
+     * accumulator, i.e. the initial value (the second argument). It is nullable if the input array
+     * or the initial value is nullable, or if the reducer lambda body can produce {@code NULL}. The
+     * array element nullability alone does not make the result nullable: whether a {@code NULL}
+     * element turns the accumulator {@code NULL} is decided by the reducer body, whose result type
+     * already reflects that.
+     */
+    public static final TypeStrategy ARRAY_REDUCE =
+            callContext -> {
+                final List<DataType> argumentDataTypes = callContext.getArgumentDataTypes();
+                final DataType arrayType = argumentDataTypes.get(0);
+                final DataType accType = argumentDataTypes.get(1);
+                final org.apache.flink.table.types.logical.LogicalType lambdaResultType =
+                        LambdaStrategyUtils.requireLambdaResultType(callContext, 2);
+                final boolean nullable =
+                        arrayType.getLogicalType().isNullable()
+                                || accType.getLogicalType().isNullable()
+                                || lambdaResultType.isNullable();
+                return Optional.of(nullable ? accType.nullable() : accType.notNull());
+            };
+
+    /**
+     * Type strategy specific for {@link BuiltInFunctionDefinitions#ARRAY_ZIP_WITH}. The result is
+     * an array whose element type is the result type of the lambda (the third argument). The array
+     * is nullable if either input array is nullable.
+     */
+    public static final TypeStrategy ARRAY_ZIP_WITH =
+            callContext -> {
+                final List<DataType> args = callContext.getArgumentDataTypes();
+                final org.apache.flink.table.types.logical.LogicalType lambdaResultType =
+                        LambdaStrategyUtils.requireLambdaResultType(callContext, 2);
+                final boolean nullable =
+                        args.get(0).getLogicalType().isNullable()
+                                || args.get(1).getLogicalType().isNullable();
+                final DataType result = DataTypes.ARRAY(DataTypes.of(lambdaResultType));
+                return Optional.of(nullable ? result.nullable() : result.notNull());
             };
 
     /** Type strategy specific for {@link BuiltInFunctionDefinitions#OBJECT_OF}. */

@@ -866,7 +866,6 @@ collection:
     table: MAP.at(ANY)
     description: Returns the value specified by key value in map.
   - sql: ARRAY_APPEND(array, element)
-    table: array.arrayAppend(element)
     description: Appends an element to the end of the array and returns the result. If the array itself is null, the function will return null. If an element to add is null, the null element will be added to the end of the array.
   - sql: ARRAY_CONTAINS(haystack, needle)
     table: haystack.arrayContains(needle)
@@ -878,7 +877,6 @@ collection:
     table: haystack.arrayPosition(needle)
     description: Returns the position of the first occurrence of element in the given array as int. Returns 0 if the given value could not be found in the array. Returns null if either of the arguments are null. And this is not zero based, but 1-based index. The first element in the array has index 1.
   - sql: ARRAY_PREPEND(array, element)
-    table: array.arrayPrepend(element)
     description: Appends an element to the beginning of the array and returns the result. If the array itself is null, the function will return null. If an element to add is null, the null element will be added to the beginning of the array.
   - sql: ARRAY_REMOVE(haystack, needle)
     table: haystack.arrayRemove(needle)
@@ -887,10 +885,8 @@ collection:
     table: haystack.arrayReverse()
     description: Returns an array in reverse order. If the array itself is null, the function will return null.
   - sql: ARRAY_SLICE(array, start_offset[, end_offset])
-    table: array.arraySlice(start_offset[, end_offset])
     description: Returns a subarray of the input array between 'start_offset' and 'end_offset' inclusive. The offsets are 1-based however 0 is also treated as the beginning of the array. Positive values are counted from the beginning of the array while negative from the end. If 'end_offset' is omitted then this offset is treated as the length of the array. If 'start_offset' is after 'end_offset' or both are out of array bounds an empty array will be returned. Returns null if any input is null.
   - sql: ARRAY_SORT(array[, ascending_order[, null_first]])
-    table: array.arraySort([, ascendingOrder[, null_first]])
     description: Returns the array in sorted order.The function sorts an array, defaulting to ascending order with NULLs at the start when only the array is input. Specifying ascending_order as true orders the array in ascending with NULLs first, and setting it to false orders it in descending with NULLs last. Independently, null_first as true moves NULLs to the beginning, and as false to the end, irrespective of the sorting order. The function returns null if any input is null.
   - sql: ARRAY_UNION(array1, array2)
     table: haystack.arrayUnion(array)
@@ -905,13 +901,10 @@ collection:
     table: array1.arrayIntersect(array2)
     description: Returns an ARRAY that contains the elements from array1 that are also in array2, without duplicates. If no elements that are both in array1 and array2, the function returns an empty ARRAY. If any of the array is null, the function will return null. The order of the elements from array1 is kept.
   - sql: ARRAY_MAX(array)
-    table: array.arrayMax()
     description: Returns the maximum value from the array, if array itself is null, the function returns null.
   - sql: ARRAY_JOIN(array, delimiter[, nullReplacement])
-    table: array.arrayJoin(delimiter[, nullReplacement])
     description: Returns a string that represents the concatenation of the elements in the given array and the elements' data type in the given array is string. The delimiter is a string that separates each pair of consecutive elements of the array. The optional nullReplacement is a string that replaces null elements in the array. If nullReplacement is not specified, null elements in the array will be omitted from the resulting string. Returns null if input array or delimiter or nullReplacement are null.
   - sql: ARRAY_MIN(array)
-    table: array.arrayMin()
     description: Returns the minimum value from the array, if array itself is null, the function returns null.
   - sql: MAP_KEYS(map)
     table: MAP.mapKeys()
@@ -931,6 +924,38 @@ collection:
   - sql: SPLIT(string, delimiter)
     table: string.split(delimiter)
     description: Returns an array of substrings by splitting the input string based on the given delimiter. If the delimiter is not found in the string, the original string is returned as the only element in the array. If the delimiter is empty, every character in the string is split. If the string or delimiter is null, a null value is returned. If the delimiter is found at the beginning or end of the string, or there are contiguous delimiters, then an empty string is added to the array.
+
+higherorder:
+  - sql: ARRAY_TRANSFORM(array, element -> expression)
+    description: |
+      Applies the lambda to each element of `array` and returns the resulting array, i.e. `(ARRAY<E>, E -> R)` returns `ARRAY<R>`. The result element type `R` is the type of the lambda body; the order of the elements is preserved.
+
+      Returns `NULL` if `array` is `NULL`. An empty array returns an empty array. A `NULL` element is passed to the lambda like any other element.
+
+      E.g., `ARRAY_TRANSFORM(ARRAY[1, 2, 3], x -> x * 10)` returns `[10, 20, 30]`; `ARRAY_TRANSFORM(ARRAY[1, 2], x -> x + offset)` adds the value of the column `offset` to each element.
+  - sql: ARRAY_FILTER(array, element -> predicate)
+    description: |
+      Returns the elements of `array` for which the predicate lambda returns `TRUE`, i.e. `(ARRAY<E>, E -> BOOLEAN)` returns `ARRAY<E>`. A `FALSE` or `NULL` predicate excludes the element; the order of the remaining elements is preserved. The lambda body must return `BOOLEAN`; any other result type fails at validation.
+
+      Returns `NULL` if `array` is `NULL`. An empty array returns an empty array.
+
+      E.g., `ARRAY_FILTER(ARRAY[1, 2, 3], x -> x > 1)` returns `[2, 3]`; `ARRAY_FILTER(ARRAY[1, NULL, 3], x -> x IS NOT NULL)` returns `[1, 3]`.
+  - sql: ARRAY_REDUCE(array, initial_value, (acc, element) -> expression)
+    description: |
+      Left fold over `array`, i.e. `(ARRAY<E>, A, (A, E) -> A)` returns `A`. Starting from `initial_value`, the merge lambda is applied to each element in order and the final accumulator is returned. The first lambda parameter is the accumulator (its type `A` is taken from `initial_value`), the second one is the element; the result of the lambda becomes the accumulator for the next element. The result type of the call is the accumulator type `A`.
+
+      The lambda body must be assignable to `A`: implicit widening (e.g. `INT` to `BIGINT`) is allowed, but an incompatible or narrowing result type fails at validation. The result is `NULL`-able if `array`, `initial_value` or the lambda body is `NULL`-able. When the lambda body can produce `NULL`, the accumulator is inferred as `NULL`-able, so a reducer that branches on `acc IS NULL` observes an accumulator that an earlier iteration set to `NULL`.
+
+      Returns `NULL` if `array` is `NULL`. For an empty array the initial accumulator is returned. `NULL` elements are passed to the merge lambda.
+
+      E.g., `ARRAY_REDUCE(ARRAY[1, 2, 3], 0, (acc, x) -> acc + x)` returns `6`; `ARRAY_REDUCE(ARRAY['a', 'b', 'c'], '', (acc, x) -> acc || x)` returns `'abc'`.
+  - sql: ARRAY_ZIP_WITH(array1, array2, (element1, element2) -> expression)
+    description: |
+      Combines `array1` and `array2` element-wise, i.e. `(ARRAY<E1>, ARRAY<E2>, (E1, E2) -> R)` returns `ARRAY<R>`. The lambda receives the elements at each position and its result becomes the element at that position. The result element type `R` is the type of the lambda body.
+
+      The shorter array is padded with `NULL` up to the length of the longer one, so the result length is `max(cardinality(array1), cardinality(array2))` and a padded position passes `NULL` for that side. Returns `NULL` if either array is `NULL`.
+
+      E.g., `ARRAY_ZIP_WITH(ARRAY[1, 2, 3], ARRAY[10, 20, 30], (x, y) -> x + y)` returns `[11, 22, 33]`; `ARRAY_ZIP_WITH(ARRAY[1, 2], ARRAY[3, 4, 5], (x, y) -> COALESCE(x, 0) + y)` returns `[4, 6, 5]`.
 
 json:
   - sql: IS JSON [ { VALUE | SCALAR | ARRAY | OBJECT } ]

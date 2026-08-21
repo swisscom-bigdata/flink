@@ -403,6 +403,7 @@ components:
       - DESCRIPTOR
       - VARIANT
       - BITMAP
+      - FUNCTION
     OpenSessionRequestBody:
       type: object
       properties:

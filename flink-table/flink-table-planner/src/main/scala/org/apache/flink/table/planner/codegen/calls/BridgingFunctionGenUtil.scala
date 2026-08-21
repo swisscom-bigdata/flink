@@ -38,13 +38,13 @@ import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction
 import org.apache.flink.table.planner.functions.inference.OperatorBindingCallContext
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil.toScala
 import org.apache.flink.table.runtime.collector.WrappingCollector
-import org.apache.flink.table.runtime.functions.DefaultExpressionEvaluator
+import org.apache.flink.table.runtime.functions.{DefaultExpressionEvaluator, LambdaFunctionFactory}
 import org.apache.flink.table.runtime.generated.GeneratedFunction
 import org.apache.flink.table.runtime.operators.correlate.async.DelegatingAsyncTableResultFuture
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.extraction.ExtractionUtils.primitiveToWrapper
-import org.apache.flink.table.types.inference.{CallContext, TypeInference, TypeInferenceUtil}
-import org.apache.flink.table.types.logical.{LogicalType, LogicalTypeRoot, RowType}
+import org.apache.flink.table.types.inference.{CallContext, LambdaInfo, RefinableLambdaInputTypeStrategy, TypeInference, TypeInferenceUtil}
+import org.apache.flink.table.types.logical.{FunctionType, LogicalType, LogicalTypeRoot, RowType}
 import org.apache.flink.table.types.logical.RowType.RowField
 import org.apache.flink.table.types.logical.utils.LogicalTypeCasts.supportsAvoidingCast
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.isCompositeType
@@ -79,7 +79,9 @@ object BridgingFunctionGenUtil {
       callContext: CallContext,
       udf: UserDefinedFunction,
       functionName: String,
-      skipIfArgsNull: Boolean): GeneratedExpression = {
+      skipIfArgsNull: Boolean,
+      evaluatorFactory: ExpressionEvaluatorFactory = null,
+      lambdaCaptureOperands: Seq[GeneratedExpression] = Nil): GeneratedExpression = {
 
     val (call, _) = generateFunctionAwareCallWithDataType(
       ctx,
@@ -89,7 +91,9 @@ object BridgingFunctionGenUtil {
       callContext,
       udf,
       functionName,
-      skipIfArgsNull)
+      skipIfArgsNull,
+      evaluatorFactory,
+      lambdaCaptureOperands)
 
     call
   }
@@ -102,7 +106,9 @@ object BridgingFunctionGenUtil {
       callContext: CallContext,
       udf: UserDefinedFunction,
       functionName: String,
-      skipIfArgsNull: Boolean): (GeneratedExpression, DataType) = {
+      skipIfArgsNull: Boolean,
+      evaluatorFactory: ExpressionEvaluatorFactory = null,
+      lambdaCaptureOperands: Seq[GeneratedExpression] = Nil): (GeneratedExpression, DataType) = {
     val result = generateFunctionAwareCallWithDataTypeAndTimeout(
       ctx,
       operands,
@@ -111,7 +117,9 @@ object BridgingFunctionGenUtil {
       callContext,
       udf,
       functionName,
-      skipIfArgsNull)
+      skipIfArgsNull,
+      evaluatorFactory,
+      lambdaCaptureOperands)
     (result._1, result._3)
   }
 
@@ -153,7 +161,7 @@ object BridgingFunctionGenUtil {
       callContext,
       classOf[PlannerBase].getClassLoader,
       ctx.tableConfig,
-      new DefaultExpressionEvaluatorFactory(ctx.tableConfig, ctx.classLoader, rexFactory)
+      new DefaultExpressionEvaluatorFactory(ctx.tableConfig, ctx.classLoader, rexFactory, ctx)
     )
     val inference = udf.getTypeInference(dataTypeFactory)
 
@@ -189,12 +197,54 @@ object BridgingFunctionGenUtil {
       callContext: CallContext,
       udf: UserDefinedFunction,
       functionName: String,
-      skipIfArgsNull: Boolean): (GeneratedExpression, Option[GeneratedExpression], DataType) = {
+      skipIfArgsNull: Boolean,
+      evaluatorFactory: ExpressionEvaluatorFactory = null,
+      lambdaCaptureOperands: Seq[GeneratedExpression] = Nil)
+      : (GeneratedExpression, Option[GeneratedExpression], DataType) = {
 
     // enrich argument types with conversion class
     val castCallContext = TypeInferenceUtil.castArguments(inference, callContext, null)
     val enrichedArgumentDataTypes = toScala(castCallContext.getArgumentDataTypes)
-    verifyArgumentTypes(operands.map(_.resultType), enrichedArgumentDataTypes)
+
+    // A lambda argument (FUNCTION type) of a higher-order function is passed to eval() as a
+    // first-class function object (java.util.function.Function / BiFunction) that wraps the compiled
+    // lambda body (see generateLambdaFunctionObject). All other operands are passed through as usual.
+    // The FUNCTION type of a lifted lambda already excludes the lifted capture parameters (see
+    // OperatorBindingCallContext#lambdaDataType), so it carries the user-visible arity and thus the
+    // eval() parameter class Function / BiFunction / TriFunction.
+    //
+    // A call may carry more than one lambda argument. The trailing capture operands are then the
+    // concatenation, in left-to-right operand order, of each lambda's own captures. A lambda's
+    // captures are exactly the parameters beyond the user-visible arity that its FUNCTION type
+    // records, so we partition the trailing operands back to the owning lambda by consuming, per
+    // lambda, as many as it declares.
+    var captureOffset = 0
+    val (runtimeOperands, runtimeArgumentDataTypes) = enrichedArgumentDataTypes.indices.map {
+      i =>
+        val dataType = enrichedArgumentDataTypes(i)
+        if (dataType.getLogicalType.is(LogicalTypeRoot.FUNCTION)) {
+          val lambdaInfo = toScala(callContext.getLambdaArgument(i)).getOrElse(
+            throw new CodeGenException(
+              s"Missing lambda argument at position $i for function '$functionName'."))
+          val captureCount = lambdaInfo.getParameterFields.size() -
+            dataType.getLogicalType.asInstanceOf[FunctionType].getParameterCount
+          val lambdaCaptures =
+            lambdaCaptureOperands.slice(captureOffset, captureOffset + captureCount)
+          captureOffset += captureCount
+          val functionObject = generateLambdaFunctionObject(
+            ctx,
+            evaluatorFactory,
+            lambdaInfo,
+            dataType,
+            requiredLambdaResultDataType(castCallContext, i),
+            lambdaCaptures)
+          (functionObject, dataType)
+        } else {
+          (operands(i), dataType)
+        }
+    }.unzip
+
+    verifyArgumentTypes(runtimeOperands.map(_.resultType), runtimeArgumentDataTypes)
 
     // enrich output types with conversion class
     val enrichedOutputDataType =
@@ -203,13 +253,13 @@ object BridgingFunctionGenUtil {
 
     // find runtime method and generate call
     verifyFunctionAwareImplementation(
-      enrichedArgumentDataTypes,
+      runtimeArgumentDataTypes,
       enrichedOutputDataType,
       udf,
       functionName)
 
     val functionTerm = ctx.addReusableFunction(udf)
-    val externalOperands = prepareExternalOperands(ctx, operands, enrichedArgumentDataTypes)
+    val externalOperands = prepareExternalOperands(ctx, runtimeOperands, runtimeArgumentDataTypes)
 
     val call = generateFunctionAwareCallFromPreparedOperands(
       ctx,
@@ -225,7 +275,7 @@ object BridgingFunctionGenUtil {
       generateAsyncTableFunctionTimeoutCall(
         udf,
         functionName,
-        enrichedArgumentDataTypes,
+        runtimeArgumentDataTypes,
         functionTerm,
         externalOperands,
         returnType,
@@ -545,13 +595,184 @@ object BridgingFunctionGenUtil {
       .zip(argumentDataTypes)
       .map {
         case (operand, dataType) =>
-          operand match {
-            case external: ExternalGeneratedExpression
-                if !isInternal(dataType) && (external.getDataType == dataType) =>
-              operand.copy(resultTerm = external.getExternalTerm, code = external.getExternalCode)
-            case _ => operand.copy(resultTerm = genToExternalConverterAll(ctx, dataType, operand))
+          if (dataType.getLogicalType.is(LogicalTypeRoot.FUNCTION)) {
+            // A lambda (FUNCTION-typed) argument is already an external function object generated by
+            // generateLambdaFunctionObject; pass it through without conversion (the FUNCTION type
+            // has no internal representation).
+            operand match {
+              case external: ExternalGeneratedExpression =>
+                operand.copy(resultTerm = external.getExternalTerm, code = external.getExternalCode)
+              case _ => operand
+            }
+          } else {
+            operand match {
+              case external: ExternalGeneratedExpression
+                  if !isInternal(dataType) && (external.getDataType == dataType) =>
+                operand.copy(resultTerm = external.getExternalTerm, code = external.getExternalCode)
+              case _ =>
+                operand.copy(resultTerm = genToExternalConverterAll(ctx, dataType, operand))
+            }
           }
       }
+  }
+
+  /**
+   * The type a function requires the body of its lambda argument at `pos` to produce, if any. Only
+   * a built-in [[RefinableLambdaInputTypeStrategy]] declares one; see
+   * [[RefinableLambdaInputTypeStrategy#getRequiredLambdaResultType]].
+   *
+   * The strategy is taken from the function *definition* rather than from the specialized
+   * function's own [[TypeInference]]: a specialized function restates its already-resolved argument
+   * types as an explicit sequence (see `BuiltInScalarFunction#getTypeInference`), which no longer
+   * carries the declaring strategy.
+   */
+  private def requiredLambdaResultDataType(callContext: CallContext, pos: Int): Option[DataType] = {
+    val declaredStrategy = callContext.getFunctionDefinition
+      .getTypeInference(callContext.getDataTypeFactory)
+      .getInputTypeStrategy
+    declaredStrategy match {
+      case strategy: RefinableLambdaInputTypeStrategy =>
+        toScala(strategy.getRequiredLambdaResultType(callContext, pos))
+      case _ => None
+    }
+  }
+
+  /**
+   * Generates the first-class function object passed to a user-defined higher-order function for a
+   * lambda (FUNCTION-typed) argument: a [[java.util.function.Function]] for a one-parameter lambda,
+   * a [[java.util.function.BiFunction]] for a two-parameter lambda, or an
+   * [[org.apache.flink.util.function.TriFunction]] for a three-parameter lambda. The lambda body is
+   * compiled into an [[ExpressionEvaluator]] that is opened once in the operator and doubles as the
+   * factory for these objects; the generated object casts its arguments to the lambda parameters'
+   * external classes and calls the compiled body directly.
+   *
+   * A failure in the body surfaces from `apply` the same way for a user-defined and for a built-in
+   * higher-order function, since both take this path: an unchecked exception propagates unchanged,
+   * while a checked exception is wrapped because the functional interface cannot declare it.
+   */
+  private def generateLambdaFunctionObject(
+      ctx: CodeGeneratorContext,
+      evaluatorFactory: ExpressionEvaluatorFactory,
+      lambdaInfo: LambdaInfo,
+      lambdaDataType: DataType,
+      requiredResultDataType: Option[DataType],
+      captureOperands: Seq[GeneratedExpression]): ExternalGeneratedExpression = {
+    if (evaluatorFactory == null) {
+      throw new CodeGenException(
+        "A lambda argument can only be generated for a user-defined higher-order function call.")
+    }
+    // The values a function feeds its lambda are its own, so the body is compiled in the
+    // representation the function declared for this argument (see FunctionType). LambdaInfo
+    // describes the lambda as it was written, which is representation-neutral.
+    val internalLambdaData = DataTypeUtils.isInternal(lambdaDataType)
+    // The evaluator is compiled against all lambda parameters (the user-visible ones followed by the
+    // lifted captures); the function object only exposes the user-visible parameters and binds the
+    // lifted captures to the (loop-invariant) values of the trailing capture operands.
+    val toLambdaDataType: DataTypes.Field => DataTypes.Field = field =>
+      if (internalLambdaData) {
+        DataTypes.FIELD(field.getName, DataTypeUtils.toInternalDataType(field.getDataType))
+      } else {
+        field
+      }
+    val allParamFields = toScala(lambdaInfo.getParameterFields).map(toLambdaDataType)
+    // A function may require the body to produce a type of its own choosing rather than the type the
+    // body happens to have (ARRAY_REDUCE coerces its reducer to the accumulator type, see
+    // RefinableLambdaInputTypeStrategy#getRequiredLambdaResultType). The coercion is expressed as a
+    // CAST around the body so that it is folded into the compiled body instead of costing an extra
+    // conversion per application.
+    // Nullability is deliberately not part of the comparison: a nullable body is only ever handed to
+    // a nullable parameter (the refinement pass above widens the accumulator for it), and casting
+    // would only restate the body's own type. The body keeps its own nullability so that it stays
+    // the type the expression actually has.
+    val needsCoercion = requiredResultDataType.exists(
+      dataType =>
+        !dataType.getLogicalType
+          .copy(true)
+          .equals(lambdaInfo.getReturnDataType.getLogicalType.copy(true)))
+    val bodyResultDataType = if (needsCoercion) {
+      requiredResultDataType.get
+    } else {
+      lambdaInfo.getReturnDataType
+    }
+    val body = if (needsCoercion) {
+      unresolvedCall(
+        BuiltInFunctionDefinitions.CAST,
+        lambdaInfo.getBody,
+        typeLiteral(bodyResultDataType))
+    } else {
+      lambdaInfo.getBody
+    }
+    val returnDataType = if (internalLambdaData) {
+      DataTypeUtils.toInternalDataType(bodyResultDataType)
+    } else {
+      bodyResultDataType
+    }
+    val captureCount = captureOperands.size
+    val paramFields = allParamFields.dropRight(captureCount)
+    val captureFields = allParamFields.takeRight(captureCount)
+    // The conversion class of the FUNCTION type is the functional interface the receiving function
+    // declared, so it settles both the arity and the representation of the function object.
+    val lambdaSpec = LambdaFactorySpec(paramFields.size, lambdaDataType.getConversionClass)
+    val interfaceClass = typeTerm(lambdaSpec.interfaceClass)
+
+    // compile the lambda body into an evaluator and open it in the operator
+    val evaluator = evaluatorFactory match {
+      case defaultFactory: DefaultExpressionEvaluatorFactory =>
+        defaultFactory.createLambdaEvaluator(body, returnDataType, lambdaSpec, allParamFields)
+      case _ =>
+        throw new CodeGenException(
+          s"A lambda argument requires a ${classOf[DefaultExpressionEvaluatorFactory].getSimpleName}, " +
+            s"but got '${evaluatorFactory.getClass.getName}'.")
+    }
+    val evaluatorTerm =
+      ctx.addReusableObject(
+        evaluator,
+        "lambdaEvaluator",
+        classOf[DefaultExpressionEvaluator].getCanonicalName)
+    val factoryTerm = newName(ctx, "lambdaFactory")
+    ctx.addReusableMember(s"private transient ${className[LambdaFunctionFactory]} $factoryTerm;")
+    // A lambda may itself be nested in another lambda body; the enclosing generated class is then an
+    // expression evaluator without a runtime context, which supplies a context of its own.
+    ctx.addReusableOpenStatement(
+      s"$factoryTerm = $evaluatorTerm.openLambdaFactory(${ctx.functionContextCode()});")
+    // The framework owns the evaluator's lifecycle: it is closed with the enclosing generated class
+    // so that a function called from the lambda body is closed like anywhere else.
+    ctx.addReusableCloseStatement(s"$evaluatorTerm.close();")
+
+    // Evaluate the captured values and convert each to the class the compiled body expects.
+    // Captures are not necessarily loop-invariant: an enclosing lambda parameter capture changes per
+    // outer iteration, and the function object is then rebuilt for each iteration.
+    val captureBindings = captureOperands.zip(captureFields).map {
+      case (operand, field) =>
+        val externalTerm = genToExternalConverterAll(ctx, field.getDataType, operand)
+        val captureTerm = newName(ctx, "lambdaCapture")
+        val captureClass = typeTerm(field.getDataType.getConversionClass)
+        val bindingCode =
+          s"""
+             |${operand.code}
+             |final $captureClass $captureTerm = ($captureClass) ($externalTerm);
+             |""".stripMargin
+        (captureTerm, bindingCode)
+    }
+    val captureCode = captureBindings.map(_._2).mkString("\n")
+    val captureArray = captureBindings.map(_._1).mkString(", ")
+
+    val funcTerm = newName(ctx, "lambdaFunction")
+    // The captures are boxed into one array per function object, i.e. once per row, and unpacked
+    // behind the object. The per-element path is a plain interface call into the compiled body, so
+    // it carries neither the Object[] allocation nor the asType adaptation that a MethodHandle's
+    // invokeWithArguments performs on every application.
+    val code =
+      s"""
+         |$captureCode
+         |final $interfaceClass $funcTerm =
+         |    ($interfaceClass) $factoryTerm.bindLambda(new Object[] {$captureArray});
+         |""".stripMargin
+    ExternalGeneratedExpression.fromGeneratedExpression(
+      lambdaDataType,
+      funcTerm,
+      code,
+      GeneratedExpression(funcTerm, NEVER_NULL, NO_CODE, lambdaDataType.getLogicalType))
   }
 
   private def verifyArgumentTypes(
@@ -653,10 +874,18 @@ object BridgingFunctionGenUtil {
     validateClassForRuntime(udf.getClass, methodName, argumentClasses, outputClass, functionName)
   }
 
+  /**
+   * Describes the function object a lambda body is compiled for: the functional interface it
+   * implements and how many of the evaluator's leading arguments that interface exposes. The
+   * remaining arguments are the lifted captures, which are bound once per function object.
+   */
+  case class LambdaFactorySpec(userParamCount: Int, interfaceClass: Class[_])
+
   class DefaultExpressionEvaluatorFactory(
       tableConfig: ReadableConfig,
       classLoader: ClassLoader,
-      rexFactory: RexFactory)
+      rexFactory: RexFactory,
+      parentCtx: CodeGeneratorContext)
     extends ExpressionEvaluatorFactory {
 
     override def createEvaluator(
@@ -691,11 +920,36 @@ object BridgingFunctionGenUtil {
         expression: Expression,
         outputDataType: DataType,
         args: DataTypes.Field*): ExpressionEvaluator = {
+      createEvaluator(expression, outputDataType, None, args)
+    }
+
+    /**
+     * Creates an evaluator for a lambda body. The generated class additionally implements
+     * [[LambdaFunctionFactory]], so that the function object handed to a higher-order function can
+     * call the compiled body directly instead of through a [[java.lang.invoke.MethodHandle]].
+     *
+     * `args` covers the lambda's user-visible parameters followed by its lifted captures; the
+     * function object exposes only the leading `spec.userParamCount` fields.
+     */
+    def createLambdaEvaluator(
+        expression: Expression,
+        outputDataType: DataType,
+        spec: LambdaFactorySpec,
+        args: Seq[DataTypes.Field]): DefaultExpressionEvaluator = {
+      createEvaluator(expression, outputDataType, Some(spec), args)
+        .asInstanceOf[DefaultExpressionEvaluator]
+    }
+
+    private def createEvaluator(
+        expression: Expression,
+        outputDataType: DataType,
+        lambdaSpec: Option[LambdaFactorySpec],
+        args: Seq[DataTypes.Field]): ExpressionEvaluator = {
       args.foreach(f => validateInputDataType(f.getDataType))
       validateOutputDataType(outputDataType)
 
       try {
-        createEvaluatorOrError(expression, outputDataType, args)
+        createEvaluatorOrError(expression, outputDataType, lambdaSpec, args)
       } catch {
         case t: Throwable =>
           throw new TableException(
@@ -719,7 +973,9 @@ object BridgingFunctionGenUtil {
      *
      *   public void open(org.apache.flink.configuration.Configuration parameters) throws Exception {}
      *
-     *   public java.lang.Boolean eval(java.lang.Integer arg0, java.lang.Integer arg1) {
+     *   public void close() throws Exception {}
+     *
+     *   public java.lang.Boolean eval(java.lang.Integer arg0, java.lang.Integer arg1) throws Exception {
      *     int result$16;
      *     boolean isNull$16;
      *     int result$17;
@@ -758,11 +1014,12 @@ object BridgingFunctionGenUtil {
     private def createEvaluatorOrError(
         expression: Expression,
         outputDataType: DataType,
+        lambdaSpec: Option[LambdaFactorySpec],
         args: Seq[DataTypes.Field]): ExpressionEvaluator = {
       val argFields = args.map(f => new RowField(f.getName, f.getDataType.getLogicalType))
       val outputType = outputDataType.getLogicalType
 
-      val ctx = new EvaluatorCodeGeneratorContext(tableConfig, classLoader)
+      val ctx = new EvaluatorCodeGeneratorContext(tableConfig, classLoader, parentCtx)
 
       val externalOutputClass = outputDataType.getConversionClass
       val externalOutputTypeTerm = typeTerm(externalOutputClass)
@@ -829,9 +1086,15 @@ object BridgingFunctionGenUtil {
       }
 
       val evaluatorName = newName(ctx, "ExpressionEvaluator")
+      val lambdaFactoryCode = lambdaSpec
+        .map(spec => generateBindLambda(spec, externalArgTypeTerms, externalOutputTypeTerm))
+        .getOrElse("")
+      val lambdaFactoryInterface = lambdaSpec
+        .map(_ => s" implements ${className[LambdaFunctionFactory]}")
+        .getOrElse("")
       val evaluatorCode =
         s"""
-           |public class $evaluatorName extends ${className[AbstractRichFunction]} {
+           |public class $evaluatorName extends ${className[AbstractRichFunction]}$lambdaFactoryInterface {
            |
            |  ${ctx.reuseMemberCode()}
            |  ${ctx.reuseInnerClassDefinitionCode()}
@@ -843,7 +1106,13 @@ object BridgingFunctionGenUtil {
            |    ${ctx.reuseOpenCode()}
            |  }
            |
-           |  public $externalOutputTypeTerm eval($argsSignatureCode) {
+           |  public void close() throws Exception {
+           |    ${ctx.reuseCloseCode()}
+           |  }
+           |
+           |  $lambdaFactoryCode
+           |
+           |  public $externalOutputTypeTerm eval($argsSignatureCode) throws Exception {
            |    ${ctx.reuseLocalVariableCode()}
            |    ${argToInternalExprs.map(_.code).mkString("\n")}
            |    $argMappingCode
@@ -864,10 +1133,77 @@ object BridgingFunctionGenUtil {
         externalArgClasses.toArray,
         rexNode.toString)
     }
+
+    /**
+     * Generates the [[LambdaFunctionFactory]] implementation for a lambda body: a `bindLambda`
+     * method that converts the lifted capture values once and returns a function object whose
+     * `apply` calls the typed `eval` method directly.
+     *
+     * The captures are cast outside the returned object so that the per-element path is only the
+     * interface call, the user-visible argument casts, and `eval` itself.
+     *
+     * A lambda body is arbitrary generated expression code and may therefore throw a checked
+     * exception, which the functional interface's `apply` cannot declare. Such an exception is
+     * wrapped so that it still surfaces with the body's own cause attached.
+     */
+    private def generateBindLambda(
+        spec: LambdaFactorySpec,
+        externalArgTypeTerms: Seq[String],
+        externalOutputTypeTerm: String): String = {
+      val userParamCount = spec.userParamCount
+      val interfaceClass = typeTerm(spec.interfaceClass)
+      val paramTypeTerms = externalArgTypeTerms.take(userParamCount)
+      val captureTypeTerms = externalArgTypeTerms.drop(userParamCount)
+      val captureTerms = captureTypeTerms.indices.map(i => s"capture$i")
+      val captureBindings = captureTerms
+        .zip(captureTypeTerms)
+        .zipWithIndex
+        .map {
+          case ((captureTerm, captureTypeTerm), i) =>
+            s"final $captureTypeTerm $captureTerm = ($captureTypeTerm) captures[$i];"
+        }
+        .mkString("\n")
+      val applyParams = (0 until userParamCount).map(i => s"Object arg$i").mkString(", ")
+      val evalArgs = paramTypeTerms.zipWithIndex.map {
+        case (paramTypeTerm, i) => s"($paramTypeTerm) arg$i"
+      } ++ captureTerms
+
+      s"""
+         |@Override
+         |public Object bindLambda(Object[] captures) {
+         |  $captureBindings
+         |  return new $interfaceClass() {
+         |    @Override
+         |    public Object apply($applyParams) {
+         |      try {
+         |        return ($externalOutputTypeTerm) eval(${evalArgs.mkString(", ")});
+         |      } catch (RuntimeException lambdaError) {
+         |        throw lambdaError;
+         |      } catch (Exception lambdaError) {
+         |        throw new ${classOf[org.apache.flink.util.FlinkRuntimeException].getCanonicalName}(
+         |          "Could not evaluate lambda body.", lambdaError);
+         |      }
+         |    }
+         |  };
+         |}
+         |""".stripMargin
+    }
   }
 
-  private class EvaluatorCodeGeneratorContext(tableConfig: ReadableConfig, classLoader: ClassLoader)
-    extends CodeGeneratorContext(tableConfig, classLoader) {
+  /**
+   * A context for an expression evaluator's generated class.
+   *
+   * The parent context is the context of the generated class that holds the evaluator. It is not
+   * used for sharing reusable statements (an evaluator is a class of its own) but for sharing the
+   * name counter: an evaluator whose expression contains a lambda holds a nested evaluator, and the
+   * nested one is compiled with the enclosing evaluator's class loader as its parent. Equal class
+   * names would therefore make the nested class resolve to the enclosing one.
+   */
+  private class EvaluatorCodeGeneratorContext(
+      tableConfig: ReadableConfig,
+      classLoader: ClassLoader,
+      parentCtx: CodeGeneratorContext)
+    extends CodeGeneratorContext(tableConfig, classLoader, parentCtx) {
 
     override def addReusableConverter(
         dataType: DataType,
@@ -884,5 +1220,10 @@ object BridgingFunctionGenUtil {
         classOf[FunctionContext],
         Seq("null, this.getClass().getClassLoader()", "null"))
     }
+
+    // An evaluator is not an operator and thus has no runtime context.
+    override def functionContextCode(): String =
+      s"new ${classOf[FunctionContext].getCanonicalName}(" +
+        "null, this.getClass().getClassLoader(), null)"
   }
 }

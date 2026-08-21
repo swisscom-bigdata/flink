@@ -84,6 +84,13 @@ import static org.apache.calcite.rel.type.RelDataType.PRECISION_NOT_SPECIFIED;
  * because of Flink modifications.
  *
  * <p>FLINK modifications (backport of CALCITE-6764): Line 2488~2492
+ *
+ * <p>FLINK modifications ({@code isDeterministic} descends into {@link RexLambda} bodies so that a
+ * non-deterministic lambda body makes the enclosing higher-order function call non-deterministic;
+ * CALCITE-6242 fixes this upstream in 1.43.0 by making {@link RexVisitorImpl#visitLambda} recurse
+ * when {@code deep}, which is how the visitor below is constructed, so the block can simply be
+ * removed after upgrading Calcite to 1.43.0): see the {@code FLINK MODIFICATION} block in {@link
+ * #isDeterministic(RexNode)}.
  */
 public class RexUtil {
 
@@ -841,6 +848,26 @@ public class RexUtil {
                             }
                             return super.visitCall(call);
                         }
+
+                        // ----- FLINK MODIFICATION BEGIN -----
+                        // Reason: descend into lambda bodies so that a non-deterministic call
+                        // inside a higher-order function's lambda (e.g. ARRAY_TRANSFORM(a, x ->
+                        // RAND())) makes the enclosing expression non-deterministic. Without this,
+                        // RexVisitorImpl#visitLambda returns without visiting the body, and unsafe
+                        // optimizations (CSE, filter push-down, result caching) could be applied.
+                        // RexUtil#isDeterministic is a public *static* method whose visitor is an
+                        // anonymous class, and Calcite calls it from its own rules, so a Flink
+                        // subclass or an alternative helper cannot take effect; the vendored copy
+                        // is the only way to apply this.
+                        // Fixed upstream by CALCITE-6242 (fixVersion 1.43.0), which makes
+                        // RexVisitorImpl#visitLambda recurse into the body when deep is set -- as
+                        // it is above. Remove this block after upgrading Calcite to 1.43.0.
+                        @Override
+                        public Void visitLambda(RexLambda lambda) {
+                            lambda.getExpression().accept(this);
+                            return super.visitLambda(lambda);
+                        }
+                        // ----- FLINK MODIFICATION END -----
                     };
             e.accept(visitor);
             return true;

@@ -74,6 +74,11 @@ class SchemaResolutionTest {
                             new LocalZonedTimestampType(false, TimestampKind.PROCTIME, 3)),
                     () -> PROCTIME_SQL);
 
+    private static final String FUNCTION_SQL = "x -> x + 1";
+
+    private static final ResolvedExpression FUNCTION_RESOLVED =
+            new ResolvedExpressionMock(DataTypes.FUNCTION(1), () -> FUNCTION_SQL);
+
     private static final Schema SCHEMA =
             Schema.newBuilder()
                     .primaryKeyNamed("primary_constraint", "id") // out of order
@@ -393,6 +398,37 @@ class SchemaResolutionTest {
     }
 
     @Test
+    void testFunctionTypeRejectedAsColumnType() {
+        // A FUNCTION type describes a lambda argument of a higher-order function. It is a planning
+        // helper that is never materialized, so it must not enter a schema (and from there a
+        // catalog) as a column type -- neither directly nor nested in a constructed type.
+
+        testError(
+                Schema.newBuilder().column("f", DataTypes.FUNCTION(1)).build(),
+                "Invalid data type 'FUNCTION(1)' for column 'f'. The FUNCTION data type is a "
+                        + "helper type for lambda arguments of higher-order functions. It cannot "
+                        + "be materialized and is not supported as a table column, persisted "
+                        + "return type, or state type.");
+
+        testError(
+                Schema.newBuilder()
+                        .column(
+                                "f",
+                                DataTypes.ARRAY(
+                                        DataTypes.ROW(DataTypes.FIELD("g", DataTypes.FUNCTION(2)))))
+                        .build(),
+                "Invalid data type 'ARRAY<ROW<`g` FUNCTION(2)>>' for column 'f'.");
+
+        testError(
+                Schema.newBuilder().columnByMetadata("f", DataTypes.FUNCTION(1)).build(),
+                "Invalid data type 'FUNCTION(1)' for column 'f'.");
+
+        testError(
+                Schema.newBuilder().columnByExpression("f", callSql(FUNCTION_SQL)).build(),
+                "Invalid data type 'FUNCTION(1)' for column 'f'.");
+    }
+
+    @Test
     void testIndexNamedBuildingErrors() {
         assertThatThrownBy(
                         () ->
@@ -663,6 +699,8 @@ class SchemaResolutionTest {
                 return PROCTIME_RESOLVED;
             case INVALID_WATERMARK_SQL:
                 return INVALID_WATERMARK_RESOLVED;
+            case FUNCTION_SQL:
+                return FUNCTION_RESOLVED;
             default:
                 throw new UnsupportedOperationException("Unknown SQL expression.");
         }

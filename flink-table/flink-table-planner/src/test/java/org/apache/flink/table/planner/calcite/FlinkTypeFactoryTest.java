@@ -27,6 +27,7 @@ import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.legacy.types.logical.TypeInformationRawType;
+import org.apache.flink.table.planner.plan.schema.FunctionRelDataType;
 import org.apache.flink.table.planner.plan.schema.GenericRelDataType;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -41,6 +42,7 @@ import org.apache.flink.table.types.logical.DescriptorType;
 import org.apache.flink.table.types.logical.DistinctType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -340,6 +342,65 @@ class FlinkTypeFactoryTest {
                 .hasMessageContaining("Generic RAW types must have a common type information");
     }
 
+    @Test
+    void testFunctionTypeRoundTrip() {
+        FlinkTypeFactory typeFactory =
+                new FlinkTypeFactory(
+                        Thread.currentThread().getContextClassLoader(), FlinkTypeSystem.INSTANCE);
+
+        final FunctionType functionType = new FunctionType(2);
+
+        final RelDataType relDataType = typeFactory.createFieldTypeFromLogicalType(functionType);
+        assertThat(relDataType).isInstanceOf(FunctionRelDataType.class);
+        assertThat(FlinkTypeFactory.toLogicalType(relDataType)).isEqualTo(functionType);
+    }
+
+    @Test
+    void testFunctionTypeNullabilityIsCanonicalized() {
+        FlinkTypeFactory typeFactory =
+                new FlinkTypeFactory(
+                        Thread.currentThread().getContextClassLoader(), FlinkTypeSystem.INSTANCE);
+
+        // A lambda is never a runtime value, so its wrapper nullability is not meaningful. Every
+        // construction path must yield the same canonical logical type and the same
+        // FunctionRelDataType digest, otherwise two lambdas of the same arity would split during
+        // coercion/inference. Regression guard for FLINK-31207.
+        final FunctionType defaultNullable = new FunctionType(2);
+        final LogicalType copiedNotNull = defaultNullable.copy(false);
+        final LogicalType notNullViaDataTypes = DataTypes.FUNCTION(2).notNull().getLogicalType();
+
+        // the wrapper nullability is canonicalized away on every construction path
+        assertThat(defaultNullable.isNullable()).isTrue();
+        assertThat(copiedNotNull).isEqualTo(defaultNullable);
+        assertThat(notNullViaDataTypes).isEqualTo(defaultNullable);
+        assertThat(copiedNotNull.isNullable()).isTrue();
+        assertThat(notNullViaDataTypes.isNullable()).isTrue();
+
+        // all three forms share summary and serializable strings
+        assertThat(copiedNotNull.asSerializableString())
+                .isEqualTo(defaultNullable.asSerializableString());
+        assertThat(notNullViaDataTypes.asSerializableString())
+                .isEqualTo(defaultNullable.asSerializableString());
+        assertThat(copiedNotNull.asSummaryString()).isEqualTo(defaultNullable.asSummaryString());
+
+        // all three forms produce the same FunctionRelDataType digest
+        final RelDataType relFromNullable =
+                typeFactory.createFieldTypeFromLogicalType(defaultNullable);
+        final RelDataType relFromCopy = typeFactory.createFieldTypeFromLogicalType(copiedNotNull);
+        final RelDataType relFromDataTypes =
+                typeFactory.createFieldTypeFromLogicalType(notNullViaDataTypes);
+        assertThat(relFromNullable).isInstanceOf(FunctionRelDataType.class);
+        assertThat(relFromCopy.getFullTypeString()).isEqualTo(relFromNullable.getFullTypeString());
+        assertThat(relFromDataTypes.getFullTypeString())
+                .isEqualTo(relFromNullable.getFullTypeString());
+
+        // requesting either Calcite nullability yields the same canonical type (same digest)
+        final RelDataType asNullable = typeFactory.createTypeWithNullability(relFromNullable, true);
+        final RelDataType asNotNull = typeFactory.createTypeWithNullability(relFromNullable, false);
+        assertThat(asNullable.getFullTypeString()).isEqualTo(relFromNullable.getFullTypeString());
+        assertThat(asNotNull.getFullTypeString()).isEqualTo(relFromNullable.getFullTypeString());
+    }
+
     static Stream<Arguments> testLeastRestrictive() {
         return Stream.of(
                 // Since the problem is actual for collection
@@ -454,6 +515,7 @@ class FlinkTypeFactoryTest {
         types.put(LogicalTypeRoot.DESCRIPTOR, new DescriptorType());
         types.put(LogicalTypeRoot.VARIANT, new VariantType());
         types.put(LogicalTypeRoot.BITMAP, new BitmapType());
+        types.put(LogicalTypeRoot.FUNCTION, new FunctionType(1));
         return types;
     }
 

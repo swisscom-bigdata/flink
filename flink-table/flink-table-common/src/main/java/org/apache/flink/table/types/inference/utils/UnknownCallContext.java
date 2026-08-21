@@ -24,6 +24,7 @@ import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.LambdaInfo;
 
 import java.util.AbstractList;
 import java.util.List;
@@ -91,6 +92,14 @@ public final class UnknownCallContext implements CallContext {
 
     @Override
     public <T> Optional<T> getArgumentValue(int pos, Class<T> clazz) {
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<LambdaInfo> getLambdaArgument(int pos) {
+        // Stated explicitly rather than inherited: a lambda argument is unknown here like every
+        // other argument, which makes a strategy that declares one fail to infer instead of
+        // deriving types from a lambda that this context cannot describe.
         return Optional.empty();
     }
 

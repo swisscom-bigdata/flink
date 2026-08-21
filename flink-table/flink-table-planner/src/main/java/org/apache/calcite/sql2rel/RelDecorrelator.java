@@ -78,6 +78,7 @@ import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexCorrelVariable;
 import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLambda;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexShuttle;
@@ -2103,12 +2104,44 @@ public class RelDecorrelator implements ReflectiveVisitor {
         private final RelNode currentRel;
         private final Map<RelNode, Frame> map;
         private final CorelMap cm;
+        // ----- FLINK MODIFICATION BEGIN -----
+        private final RexBuilder rexBuilder;
+
+        // ----- FLINK MODIFICATION END -----
 
         private DecorrelateRexShuttle(RelNode currentRel, Map<RelNode, Frame> map, CorelMap cm) {
             this.currentRel = requireNonNull(currentRel, "currentRel");
             this.map = requireNonNull(map, "map");
             this.cm = requireNonNull(cm, "cm");
+            // ----- FLINK MODIFICATION BEGIN -----
+            this.rexBuilder = currentRel.getCluster().getRexBuilder();
+            // ----- FLINK MODIFICATION END -----
         }
+
+        // ----- FLINK MODIFICATION BEGIN -----
+        @Override
+        public RexNode visitLambda(RexLambda lambda) {
+            // RexShuttle in Calcite 1.41.0 (the pinned version) visits a lambda body but discards
+            // the rewritten node and returns the original lambda, so correlated field accesses
+            // captured inside a lambda would not be rewritten to input references. Rebuild the
+            // lambda with the rewritten body, keeping the parameters unchanged (FLINK-31207
+            // higher-order functions and lambdas).
+            // Fixed upstream by CALCITE-7497 (Closed/Fixed, fixVersion 1.42.0, commit
+            // fa951db4b900), which gives RexShuttle#visitLambda exactly this rebuild-if-changed
+            // shape in the base class. Remove this override when Flink upgrades to Calcite 1.42.0
+            // or later; DecorrelateRexShuttle inherits the base-class behaviour and needs no
+            // replacement. Until then it must be carried here, because DecorrelateRexShuttle is a
+            // private static nested class instantiated from RelDecorrelator and can neither be
+            // subclassed nor injected.
+            final RexNode oldBody = lambda.getExpression();
+            final RexNode newBody = oldBody.accept(this);
+            if (newBody == oldBody) {
+                return lambda;
+            }
+            return rexBuilder.makeLambdaCall(newBody, lambda.getParameters());
+        }
+
+        // ----- FLINK MODIFICATION END -----
 
         @Override
         public RexNode visitFieldAccess(RexFieldAccess fieldAccess) {
@@ -2227,6 +2260,28 @@ public class RelDecorrelator implements ReflectiveVisitor {
             return fieldAccess;
         }
 
+        // ----- FLINK MODIFICATION BEGIN -----
+        @Override
+        public RexNode visitLambda(RexLambda lambda) {
+            // RexShuttle in Calcite 1.41.0 (the pinned version) visits a lambda body but discards
+            // the rewritten node and returns the original lambda, so a correlated field access
+            // captured inside a lambda would not be replaced by an input reference. Rebuild the
+            // lambda with the rewritten body, keeping the parameters unchanged (FLINK-31207
+            // higher-order functions and lambdas).
+            // Fixed upstream by CALCITE-7497 (fixVersion 1.42.0) for the same reason as in
+            // DecorrelateRexShuttle above; remove this override on the 1.42.0 upgrade.
+            // RemoveCorrelationRexShuttle is a private nested class, so until then the fix has to
+            // be carried here.
+            final RexNode oldBody = lambda.getExpression();
+            final RexNode newBody = oldBody.accept(this);
+            if (newBody == oldBody) {
+                return lambda;
+            }
+            return rexBuilder.makeLambdaCall(newBody, lambda.getParameters());
+        }
+
+        // ----- FLINK MODIFICATION END -----
+
         @Override
         public RexNode visitInputRef(RexInputRef inputRef) {
             if (currentRel instanceof Correlate) {
@@ -2288,16 +2343,24 @@ public class RelDecorrelator implements ReflectiveVisitor {
                     }
                 }
 
+                // ----- FLINK MODIFICATION BEGIN -----
+                // A higher-order-function call carries a lambda operand. Its return type is
+                // invariant under decorrelation (a correlated reference captured inside the lambda
+                // is replaced by an equivalently-typed input reference), and re-deriving it from
+                // the
+                // rewritten lambda operand can fail and yield ANY. Preserve the original type
+                // (FLINK-31207 higher-order functions and lambdas).
+                boolean hasLambdaOperand = false;
+                for (RexNode operand : call.operands) {
+                    if (operand instanceof RexLambda) {
+                        hasLambdaOperand = true;
+                        break;
+                    }
+                }
+                // ----- FLINK MODIFICATION END -----
+
                 final RelDataType newType;
-                if (!isSpecialCast) {
-                    // TODO: ideally this only needs to be called if the result
-                    // type will also change. However, since that requires
-                    // support from type inference rules to tell whether a rule
-                    // decides return type based on input types, for now all
-                    // operators will be recreated with new type if any operand
-                    // changed, unless the operator has "built-in" type.
-                    newType = rexBuilder.deriveReturnType(operator, clonedOperands);
-                } else {
+                if (isSpecialCast || hasLambdaOperand) {
                     // Use the current return type when creating a new call, for
                     // operators with return type built into the operator
                     // definition, and with no type inference rules, such as
@@ -2307,6 +2370,14 @@ public class RelDecorrelator implements ReflectiveVisitor {
                     // types in this category. Need to resolve those together
                     // and preferably in the base class RexShuttle.
                     newType = call.getType();
+                } else {
+                    // TODO: ideally this only needs to be called if the result
+                    // type will also change. However, since that requires
+                    // support from type inference rules to tell whether a rule
+                    // decides return type based on input types, for now all
+                    // operators will be recreated with new type if any operand
+                    // changed, unless the operator has "built-in" type.
+                    newType = rexBuilder.deriveReturnType(operator, clonedOperands);
                 }
                 newCall =
                         rexBuilder.makeCall(
@@ -3491,6 +3562,22 @@ public class RelDecorrelator implements ReflectiveVisitor {
                     subQuery.rel.accept(CorelMapBuilder.this);
                     return super.visitSubQuery(subQuery);
                 }
+
+                // ----- FLINK MODIFICATION BEGIN -----
+                @Override
+                public Void visitLambda(RexLambda lambda) {
+                    // RexVisitorImpl does not descend into RexLambda bodies (Calcite 1.41), so a
+                    // correlated field access captured inside a lambda would go undiscovered and
+                    // never be recorded in mapFieldAccessToCorVar / mapRefRelToCorRef. Visit the
+                    // body explicitly (FLINK-31207 higher-order functions and lambdas). Parameter
+                    // references (RexLambdaRef) are not correlations and need no handling.
+                    // Fixed upstream by CALCITE-6242 (fixVersion 1.43.0), which makes
+                    // RexVisitorImpl#visitLambda recurse into the body when deep is set -- as it is
+                    // for this visitor. Remove this override after upgrading Calcite to 1.43.0.
+                    lambda.getExpression().accept(this);
+                    return null;
+                }
+                // ----- FLINK MODIFICATION END -----
             };
         }
     }

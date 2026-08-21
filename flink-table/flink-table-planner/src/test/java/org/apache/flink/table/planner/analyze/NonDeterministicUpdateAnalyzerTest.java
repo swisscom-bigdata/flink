@@ -426,6 +426,31 @@ class NonDeterministicUpdateAnalyzerTest extends TableTestBase {
         assertEquals(expectedOverAggNduErrorMsg, tableException.getMessage());
     }
 
+    /**
+     * A higher-order call is only as deterministic as its lambda body, so the determinism analysis
+     * must descend into it -- Calcite's {@code RexVisitorImpl#visitLambda} does not.
+     */
+    @Test
+    void testOverAggregateWithNonDeterminismInLambdaBody() {
+        tEnv.getConfig()
+                .set(
+                        OptimizerConfigOptions.TABLE_OPTIMIZER_NONDETERMINISTIC_UPDATE_STRATEGY,
+                        NonDeterministicUpdateStrategy.TRY_RESOLVE);
+
+        String sql =
+                "INSERT INTO sink_t SELECT ARRAY_TRANSFORM(ARRAY[key], x -> UUID())[1], val, ts,"
+                        + " SUM(val) OVER ("
+                        + "PARTITION BY key "
+                        + "ORDER BY val "
+                        + "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
+                        + "AS sum_val "
+                        + "FROM source_t";
+
+        assertThatThrownBy(() -> util.verifyJsonPlan(sql))
+                .isInstanceOf(TableException.class)
+                .hasMessageContaining("non-deterministic function: UUID");
+    }
+
     @Test
     void testNowFilterPushedIntoChangelogNormalizeOnUpsertSource() {
         tEnv.getConfig()

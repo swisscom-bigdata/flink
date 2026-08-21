@@ -54,6 +54,7 @@ import org.apache.flink.table.gateway.workflow.EmbeddedRefreshHandler;
 import org.apache.flink.table.gateway.workflow.EmbeddedRefreshHandlerSerializer;
 import org.apache.flink.table.gateway.workflow.WorkflowInfo;
 import org.apache.flink.table.gateway.workflow.scheduler.EmbeddedQuartzScheduler;
+import org.apache.flink.table.planner.factories.TestValuesTableFactory;
 import org.apache.flink.table.refresh.ContinuousRefreshHandler;
 import org.apache.flink.table.refresh.ContinuousRefreshHandlerSerializer;
 import org.apache.flink.types.Row;
@@ -72,6 +73,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -167,6 +169,110 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
         long checkpointInterval =
                 getCheckpointIntervalConfig(restClusterClient, activeRefreshHandler.getJobId());
         assertThat(checkpointInterval).isEqualTo(30 * 1000);
+    }
+
+    @Test
+    void testCreateMaterializedTableWithHigherOrderFunctions() throws Exception {
+        // A materialized table, like a view, does not persist its query as written but the
+        // *expanded* one: the validated statement unparsed back to SQL with every identifier fully
+        // qualified. Every later refresh re-parses that string. A lambda parameter is bound by the
+        // enclosing higher-order call rather than by the query's row type, so the expansion must
+        // leave it unqualified, while a column the body captures is qualified like any other.
+        List<Row> data =
+                Arrays.asList(
+                        Row.of(1L, new Integer[] {1, 2, 3}, 10, "2024-01-01"),
+                        Row.of(2L, new Integer[] {4, 5}, 20, "2024-01-02"));
+        String dataId = TestValuesTableFactory.registerData(data);
+        OperationHandle sourceHandle =
+                executeStatement(
+                        String.format(
+                                "CREATE TABLE hof_source (\n"
+                                        + "  id BIGINT,\n"
+                                        + "  vals ARRAY<INT>,\n"
+                                        + "  base INT,\n"
+                                        + "  ds STRING\n"
+                                        + ")\n"
+                                        + "WITH (\n"
+                                        + "  'connector' = 'values',\n"
+                                        + "  'bounded' = 'true',\n"
+                                        + "  'data-id' = '%s'\n"
+                                        + ")",
+                                dataId));
+        awaitOperationTermination(service, sessionHandle, sourceHandle);
+
+        String materializedTableDDL =
+                "CREATE MATERIALIZED TABLE users_shops"
+                        + " PARTITIONED BY (ds)\n"
+                        + " WITH(\n"
+                        + "   'format' = 'debezium-json'\n"
+                        + " )\n"
+                        + " FRESHNESS = INTERVAL '30' SECOND\n"
+                        + " REFRESH_MODE = CONTINUOUS\n"
+                        + " AS SELECT \n"
+                        + "  id,\n"
+                        + "  ARRAY_FILTER(vals, x -> x > 1) AS big_vals,\n"
+                        + "  ARRAY_TRANSFORM(vals, x -> x + base) AS shifted_vals,\n"
+                        + "  ARRAY_REDUCE(vals, 0, (acc, x) -> acc + x) AS total,\n"
+                        + "  ds\n"
+                        + " FROM hof_source";
+        OperationHandle materializedTableHandle = executeStatement(materializedTableDDL);
+        awaitOperationTermination(service, sessionHandle, materializedTableHandle);
+
+        ObjectIdentifier userShopsIdentifier = getObjectIdentifier("users_shops");
+        ResolvedCatalogMaterializedTable materializedTable = getTable(userShopsIdentifier);
+
+        assertThat(materializedTable.getResolvedSchema())
+                .isEqualTo(
+                        ResolvedSchema.of(
+                                Arrays.asList(
+                                        Column.physical("id", DataTypes.BIGINT()),
+                                        Column.physical(
+                                                "big_vals", DataTypes.ARRAY(DataTypes.INT())),
+                                        Column.physical(
+                                                "shifted_vals", DataTypes.ARRAY(DataTypes.INT())),
+                                        Column.physical("total", DataTypes.INT()),
+                                        Column.physical("ds", DataTypes.STRING()))));
+        assertThat(materializedTable.getRefreshMode()).isSameAs(RefreshMode.CONTINUOUS);
+        // the materialized-table expansion re-parses the unparsed statement, which turns every
+        // non-reserved function name into a quoted identifier -- that is pre-existing behaviour
+        // (DATE_FORMAT and IFNULL come out the same way); what matters here is that the lambdas
+        // pass through it unharmed
+        assertThat(materializedTable.getExpandedQuery())
+                .isEqualTo(
+                        String.format(
+                                "SELECT `hof_source`.`id`,"
+                                        + " `ARRAY_FILTER`(`hof_source`.`vals`, `x` -> `x` > 1) AS `big_vals`,"
+                                        + " `ARRAY_TRANSFORM`(`hof_source`.`vals`, `x` -> `x` + `hof_source`.`base`) AS `shifted_vals`,"
+                                        + " `ARRAY_REDUCE`(`hof_source`.`vals`, 0, (`acc`, `x`) -> `acc` + `x`) AS `total`,"
+                                        + " `hof_source`.`ds`\n"
+                                        + "FROM `%s`.`%s`.`hof_source` AS `hof_source`",
+                                fileSystemCatalogName, TEST_DEFAULT_DATABASE));
+
+        // the refresh job re-plans the expanded query -- wait until it has materialized both rows
+        CommonTestUtils.waitUtil(
+                () -> fetchTableData(sessionHandle, "SELECT * FROM users_shops").size() == 2,
+                Duration.ofSeconds(20),
+                Duration.ofSeconds(2),
+                "Failed to verify the data in materialized table.");
+
+        List<RowData> rows =
+                fetchTableData(
+                                sessionHandle,
+                                "SELECT id, big_vals, shifted_vals, total, ds"
+                                        + " FROM users_shops")
+                        .stream()
+                        .sorted(Comparator.comparingLong(row -> row.getLong(0)))
+                        .collect(Collectors.toList());
+
+        assertThat(rows.get(0).getArray(1).toIntArray()).containsExactly(2, 3);
+        assertThat(rows.get(0).getArray(2).toIntArray()).containsExactly(11, 12, 13);
+        assertThat(rows.get(0).getInt(3)).isEqualTo(6);
+        assertThat(rows.get(0).getString(4)).hasToString("2024-01-01");
+
+        assertThat(rows.get(1).getArray(1).toIntArray()).containsExactly(4, 5);
+        assertThat(rows.get(1).getArray(2).toIntArray()).containsExactly(24, 25);
+        assertThat(rows.get(1).getInt(3)).isEqualTo(9);
+        assertThat(rows.get(1).getString(4)).hasToString("2024-01-02");
     }
 
     @Test
