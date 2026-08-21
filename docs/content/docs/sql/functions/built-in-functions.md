@@ -136,7 +136,8 @@ table.select(
     $("vals").arrayFilter(x -> x.isGreater(1)),
     $("vals").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
     // a lambda body may capture other columns
-    $("vals").arrayTransform(x -> x.plus($("base"))));
+    $("vals").arrayTransform(x -> x.plus($("base"))),
+    $("m").mapTransformValues((k, v) -> v.times(10)));
 ```
 {{< /tab >}}
 {{< tab "Python" >}}
@@ -146,7 +147,8 @@ table.select(
     col("vals").array_filter(lambda x: x > 1),
     col("vals").array_reduce(lit(0), lambda acc, x: acc + x),
     # a lambda body may capture other columns
-    col("vals").array_transform(lambda x: x + col("base")))
+    col("vals").array_transform(lambda x: x + col("base")),
+    col("m").map_transform_values(lambda k, v: v * 10))
 ```
 {{< /tab >}}
 {{< /tabs >}}
