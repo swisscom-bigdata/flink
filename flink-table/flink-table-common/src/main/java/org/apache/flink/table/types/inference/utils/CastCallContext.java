@@ -25,6 +25,7 @@ import org.apache.flink.table.functions.ModelSemantics;
 import org.apache.flink.table.functions.TableSemantics;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.LambdaInfo;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.util.Preconditions;
 
@@ -119,6 +120,12 @@ public final class CastCallContext implements CallContext {
     public Optional<String> getArgumentName(int pos) {
         // argument names remain regardless of casting
         return originalContext.getArgumentName(pos);
+    }
+
+    @Override
+    public Optional<LambdaInfo> getLambdaArgument(int pos) {
+        // lambda arguments remain regardless of casting
+        return originalContext.getLambdaArgument(pos);
     }
 
     @Override

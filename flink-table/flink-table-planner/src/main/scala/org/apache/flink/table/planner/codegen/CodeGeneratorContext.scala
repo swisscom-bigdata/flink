@@ -860,6 +860,19 @@ class CodeGeneratorContext(
   }
 
   /**
+   * Code that constructs the [[FunctionContext]] used in the open() method of the generated class,
+   * e.g. for opening an
+   * [[org.apache.flink.table.functions.SpecializedFunction.ExpressionEvaluator]].
+   *
+   * The default derives it from the operator's runtime context. Generated classes that are not
+   * operators (see [[BridgingFunctionGenUtil]]'s expression evaluators, [[ExpressionReducer]]'s
+   * constant context and the watermark generator pushed into a source) have no runtime context and
+   * override this accordingly, just as they override [[addReusableFunction]].
+   */
+  def functionContextCode(): String =
+    s"new ${classOf[FunctionContext].getCanonicalName}(getRuntimeContext())"
+
+  /**
    * Adds a reusable [[UserDefinedFunction]] to the member area of the generated [[Function]].
    *
    * @param function

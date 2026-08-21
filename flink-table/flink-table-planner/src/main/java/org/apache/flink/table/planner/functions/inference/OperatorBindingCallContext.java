@@ -19,25 +19,34 @@
 package org.apache.flink.table.planner.functions.inference;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.functions.TableSemantics;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.calcite.RexTableArgCall;
+import org.apache.flink.table.planner.expressions.RexNodeExpression;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.LambdaInfo;
 import org.apache.flink.table.types.inference.StaticArgument;
 import org.apache.flink.table.types.inference.StaticArgumentTrait;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.types.ColumnList;
 
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexCallBinding;
+import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLambda;
+import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorBinding;
@@ -49,6 +58,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType;
@@ -113,6 +123,14 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
                 new AbstractList<>() {
                     @Override
                     public DataType get(int pos) {
+                        // A lambda operand is represented as a FUNCTION type (a RexLambda only
+                        // carries its body type at the RexNode level).
+                        if (binding instanceof RexCallBinding) {
+                            final RexNode operand = ((RexCallBinding) binding).operands().get(pos);
+                            if (operand instanceof RexLambda) {
+                                return lambdaDataType((RexLambda) operand);
+                            }
+                        }
                         LogicalType logicalType =
                                 FlinkTypeFactory.toLogicalType(binding.getOperandType(pos));
                         return fromLogicalToDataType(logicalType);
@@ -223,6 +241,98 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
     @Override
     public Optional<DataType> getOutputDataType() {
         return Optional.ofNullable(outputDataType);
+    }
+
+    @Override
+    public Optional<LambdaInfo> getLambdaArgument(int pos) {
+        if (!(binding instanceof RexCallBinding)) {
+            return Optional.empty();
+        }
+        final RexNode operand = ((RexCallBinding) binding).operands().get(pos);
+        if (!(operand instanceof RexLambda)) {
+            return Optional.empty();
+        }
+        final RexLambda lambda = (RexLambda) operand;
+        final List<DataTypes.Field> parameterFields =
+                lambda.getParameters().stream()
+                        .map(
+                                ref ->
+                                        DataTypes.FIELD(
+                                                ref.getName(),
+                                                fromLogicalToDataType(
+                                                        toLogicalType(ref.getType()))))
+                        .collect(Collectors.toList());
+        // Rewrite the lambda parameter references to input references so that the body can be
+        // evaluated against a row of the lambda parameter fields. A lifted capture parameter is
+        // numbered apart from the lambda's own parameters, so the reference is resolved to the
+        // field position rather than to the parameter index.
+        //
+        // A lambda is only closed once its free variables have been lifted into parameters (see
+        // HigherOrderFunctionUtil#liftCaptures), which happens after the call has been converted.
+        // Until then a body may still reference a parameter of an enclosing lambda, which has no
+        // field of its own here and so cannot be expressed against this parameter row. The body is
+        // then not available -- which is what LambdaInfo#getBody documents for type inference,
+        // the only phase that sees an unlifted call.
+        final RexNode body = rewriteBodyAgainstParameters(lambda);
+        final DataType returnDataType =
+                fromLogicalToDataType(toLogicalType(lambda.getExpression().getType()));
+        final RexNodeExpression bodyExpression =
+                body == null ? null : new RexNodeExpression(body, returnDataType, null, null);
+        return Optional.of(new LambdaInfo(bodyExpression, parameterFields, returnDataType));
+    }
+
+    /**
+     * Rewrites the references to {@code lambda}'s parameters in its body into input references to
+     * the corresponding field of the lambda parameter row, or returns {@code null} if the lambda is
+     * not closed and the body therefore cannot be expressed against that row.
+     */
+    private static @Nullable RexNode rewriteBodyAgainstParameters(RexLambda lambda) {
+        final List<RexLambdaRef> parameters = lambda.getParameters();
+        final Set<Integer> declaredIndices =
+                parameters.stream().map(RexLambdaRef::getIndex).collect(Collectors.toSet());
+        final boolean[] open = {false};
+        final RexNode body =
+                lambda.getExpression()
+                        .accept(
+                                new RexShuttle() {
+                                    @Override
+                                    public RexNode visitLambdaRef(RexLambdaRef lambdaRef) {
+                                        if (!declaredIndices.contains(lambdaRef.getIndex())) {
+                                            open[0] = true;
+                                            return lambdaRef;
+                                        }
+                                        return new RexInputRef(
+                                                HigherOrderFunctionUtil.parameterPosition(
+                                                        parameters, lambdaRef.getIndex()),
+                                                lambdaRef.getType());
+                                    }
+
+                                    @Override
+                                    public RexNode visitLambda(RexLambda nestedLambda) {
+                                        // A nested lambda is its own scope: its references bind to
+                                        // its own parameters, not to this lambda's fields.
+                                        return nestedLambda;
+                                    }
+                                });
+        return open[0] ? null : body;
+    }
+
+    /**
+     * The {@code FUNCTION} type of a lambda operand as seen by the function's type inference and by
+     * its {@code eval()} method: the lifted capture parameters (see {@link
+     * HigherOrderFunctionUtil#CAPTURE_PARAM_INDEX_BASE}) are excluded, because they are bound
+     * behind the function object instead of being passed by the caller. Only the user-visible
+     * parameters determine the conversion class ({@code Function} / {@code BiFunction} / {@code
+     * TriFunction}). Before capture lifting a lambda has no capture parameters, so this is a no-op
+     * there. The parameter and result types are exposed through {@link #getLambdaArgument(int)}
+     * instead.
+     */
+    private static DataType lambdaDataType(RexLambda lambda) {
+        final long parameterCount =
+                lambda.getParameters().stream()
+                        .filter(ref -> !HigherOrderFunctionUtil.isCaptureParameter(ref))
+                        .count();
+        return fromLogicalToDataType(FunctionType.ofUncheckedArity((int) parameterCount));
     }
 
     private boolean isDescriptor(int pos) {
