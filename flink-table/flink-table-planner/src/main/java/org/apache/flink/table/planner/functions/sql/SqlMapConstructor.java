@@ -25,6 +25,7 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.fun.SqlMapValueConstructor;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.type.SqlTypeUtil;
 import org.apache.calcite.util.Pair;
 import org.apache.calcite.util.Util;
@@ -39,8 +40,16 @@ public class SqlMapConstructor extends SqlMapValueConstructor {
 
     @Override
     public RelDataType inferReturnType(SqlOperatorBinding opBinding) {
+        final List<RelDataType> operandTypes = opBinding.collectOperandTypes();
+        if (SqlValidatorUtils.containsUnresolvedLambdaParameter(operandTypes)) {
+            // An enclosing lambda parameter is not bound yet, so neither the key/value types nor
+            // the casts to them can be determined. Return a placeholder; the map type is recomputed
+            // in a later validation pass once the enclosing parameter is bound.
+            return opBinding.getTypeFactory().createSqlType(SqlTypeName.ANY);
+        }
+
         Pair<RelDataType, RelDataType> type =
-                getComponentTypes(opBinding.getTypeFactory(), opBinding.collectOperandTypes());
+                getComponentTypes(opBinding.getTypeFactory(), operandTypes);
         if (null == type) {
             return null;
         }

@@ -513,6 +513,7 @@ components:
       - VARIANT
       - BITMAP
       - UUID
+      - FUNCTION
     OpenSessionRequestBody:
       type: object
       properties:

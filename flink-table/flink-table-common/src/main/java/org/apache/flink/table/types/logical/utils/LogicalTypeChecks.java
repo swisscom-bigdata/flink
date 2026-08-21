@@ -29,6 +29,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DistinctType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LegacyTypeInformationType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
@@ -105,6 +106,18 @@ public final class LogicalTypeChecks {
      */
     public static boolean hasLegacyTypes(LogicalType logicalType) {
         return hasNested(logicalType, t -> t instanceof LegacyTypeInformationType);
+    }
+
+    /**
+     * Checks whether a (possibly nested) logical type contains a {@link FunctionType}.
+     *
+     * <p>A {@code FUNCTION} type describes a lambda argument of a higher-order function. It is a
+     * helper type during planning that is never materialized as a value, so it must be rejected
+     * wherever a type is declared for something that is materialized (e.g. a table column or the
+     * result of a function) -- also when it only appears nested in a constructed type.
+     */
+    public static boolean hasFunctionType(LogicalType logicalType) {
+        return hasNested(logicalType, t -> t.is(LogicalTypeRoot.FUNCTION));
     }
 
     public static boolean isTimeAttribute(LogicalType logicalType) {

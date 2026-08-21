@@ -96,6 +96,7 @@ import org.apache.calcite.rex.RexDynamicParam;
 import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexFieldCollation;
 import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLambda;
 import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
@@ -286,6 +287,17 @@ import static org.apache.calcite.util.Util.transform;
  * <ol>
  *   <li>FLINK-37269
  * </ol>
+ *
+ * <p>FLINK-31207 (higher-order functions and lambdas): {@link #convertLambda} mirrors the enclosing
+ * blackboard so a lambda body can resolve outer columns and enclosing lambda parameters, assigning
+ * nested lambda parameters distinct {@link RexLambdaRef} indices so free references remain
+ * distinguishable, and {@link #getCorrelationUse} finishes correlation de-duplication inside lambda
+ * bodies. CALCITE-6242 (fixVersion 1.43.0) covers part of this upstream -- inheriting the enclosing
+ * {@code nameToNodeMap} in {@code convertLambda} and the fall-through in {@code
+ * Blackboard#lookupExp} -- and those two blocks can be removed after upgrading Calcite to 1.43.0;
+ * the rest is residual, and is marked as such at each block. None of it can be applied from a
+ * subclass: {@code convertLambda} and {@code getCorrelationUse} are private and {@code
+ * Blackboard#lookupExp} is only reachable from them.
  */
 @Value.Enclosing
 public class SqlToRelConverter {
@@ -2378,18 +2390,65 @@ public class SqlToRelConverter {
         final List<RexLambdaRef> parameters = new ArrayList<>(scope.getParameterTypes().size());
         final Map<String, RelDataType> parameterTypes = scope.getParameterTypes();
 
-        int i = 0;
+        // ----- FLINK MODIFICATION BEGIN -----
+        // For a nested higher-order call, inherit the parameters of the enclosing lambda(s) so the
+        // body may close over them, and give this lambda's own parameters indices past them so that
+        // a free reference to an enclosing parameter stays distinguishable from an own parameter on
+        // Calcite's positional RexLambdaRef index. HigherOrderFunctionUtil#liftCaptures lifts such
+        // references out of the (closed) lambda and renumbers the parameters back to 0-based.
+        //
+        // CALCITE-6242 (fixVersion 1.43.0) inherits the enclosing nameToNodeMap upstream, so that
+        // part can be dropped after the upgrade. The cumulative index is residual: upstream keeps
+        // numbering every lambda's parameters from 0, which leaves a free reference to an enclosing
+        // parameter indistinguishable from this lambda's own first parameter. The clean upstream
+        // fix is a scope-qualified RexLambdaRef, which would touch the IR, serde and plan digests.
+        int base = 0;
+        if (bb.nameToNodeMap != null) {
+            for (Map.Entry<String, RexNode> enclosing : bb.nameToNodeMap.entrySet()) {
+                if (enclosing.getValue() instanceof RexLambdaRef) {
+                    nameToNodeMap.put(enclosing.getKey(), enclosing.getValue());
+                    base = Math.max(base, ((RexLambdaRef) enclosing.getValue()).getIndex() + 1);
+                }
+            }
+        }
+
+        int i = base;
         for (SqlNode p : call.getParameters()) {
             final String name = p.toString();
             final RexLambdaRef parameter =
                     new RexLambdaRef(i, name, requireNonNull(parameterTypes.get(name)));
             parameters.add(parameter);
+            // An own parameter shadows an enclosing parameter of the same name.
             nameToNodeMap.put(name, parameter);
             i++;
         }
+        // ----- FLINK MODIFICATION END -----
 
         final Blackboard lambdaBb = createBlackboard(scope, nameToNodeMap, false);
-        lambdaBb.setRoot(castNonNull(bb.inputs));
+        // ----- FLINK MODIFICATION BEGIN -----
+        // A lambda body is converted against the row of the enclosing query, so the lambda
+        // blackboard must mirror the enclosing conversion context, not just its inputs:
+        //
+        //  * the current root, and the AggConverter when the enclosing query aggregates. In "agg
+        //    mode" a group key must become a reference into the Aggregate output and an aggregate
+        //    call must be replaced by the reference the AggConverter registered for it (see
+        //    Blackboard#convertExpression). Without this, a captured group key resolves to its
+        //    *pre-aggregation* index -- which happens to be right only when the GROUP BY order
+        //    matches the input order -- and an aggregate in the body is converted raw against the
+        //    pre-aggregation input.
+        //  * the sub-queries already registered and converted on the enclosing blackboard, so that
+        //    a sub-query written in the body finds its RexNode instead of surviving into it.
+        //
+        // The resulting body holds plain input references into the enclosing row, which
+        // HigherOrderFunctionUtil#liftCaptures then hoists out of the (closed) lambda.
+        //
+        // Residual after CALCITE-6242 (fixVersion 1.43.0): upstream still only calls
+        // setRoot(bb.inputs), so a lambda body in an aggregating query is converted against the
+        // pre-aggregation row.
+        lambdaBb.setRoot(castNonNull(bb.inputs), bb.root, false);
+        lambdaBb.agg = bb.agg;
+        lambdaBb.subQueryList.addAll(bb.subQueryList);
+        // ----- FLINK MODIFICATION END -----
         final RexNode expr = lambdaBb.convertExpression(call.getExpression());
         return rexBuilder.makeLambdaCall(expr, parameters);
     }
@@ -3483,6 +3542,19 @@ public class SqlToRelConverter {
             r =
                     DeduplicateCorrelateVariables.go(
                             rexBuilder, correlNames.get(0), Util.skip(correlNames), r0);
+            // ----- FLINK MODIFICATION BEGIN -----
+            // DeduplicateCorrelateVariables rewrites correlation references with an ordinary
+            // RexShuttle, which does not descend into RexLambda bodies (Calcite 1.41). A correlated
+            // reference captured inside a lambda (FLINK-31207 higher-order functions and lambdas)
+            // is
+            // therefore left pointing at a secondary correlation variable, which would leak an
+            // undefined correlation into the plan. Finish the de-duplication inside lambda bodies
+            // by
+            // remapping every secondary correlation variable to the primary one.
+            r =
+                    deduplicateCorrelateVariablesInLambdas(
+                            r, correlNames.get(0), Util.skip(correlNames));
+            // ----- FLINK MODIFICATION END -----
             // Add new node to leaves.
             leaves.put(r, r.getRowType().getFieldCount());
         }
@@ -3501,6 +3573,61 @@ public class SqlToRelConverter {
 
         return new CorrelationUse(correlNames.get(0), requiredColumns.build(), r);
     }
+
+    // ----- FLINK MODIFICATION BEGIN -----
+    /**
+     * Remaps every reference to one of {@code secondaryIds} to {@code primaryId} inside {@link
+     * RexLambda} bodies throughout {@code rel}. This completes what {@link
+     * DeduplicateCorrelateVariables} performs outside lambda bodies but cannot perform inside them,
+     * because its {@link RexShuttle} does not descend into a {@link RexLambda} (Calcite 1.41). See
+     * {@link #getCorrelationUse}. This is a Flink extension for FLINK-31207 (higher-order functions
+     * and lambdas). Upstream status: CALCITE-6242 (fixVersion 1.43.0) does not help here -- it only
+     * makes {@code RexVisitorImpl} and {@code RexBiVisitorImpl} descend when {@code deep} -- but
+     * CALCITE-7497 (Closed/Fixed, fixVersion 1.42.0, commit fa951db4b900) rebuilds the lambda from
+     * the rewritten body in {@code RexShuttle#visitLambda} itself, which {@code
+     * DeduplicateCorrelateVariables}'s shuttle then inherits. This method can therefore be removed
+     * on the Calcite 1.42.0 upgrade. Until then it cannot live outside this file either, because
+     * {@code DeduplicateCorrelateVariables}'s shuttle is a private static nested class and {@link
+     * #getCorrelationUse} is private.
+     */
+    private RelNode deduplicateCorrelateVariablesInLambdas(
+            RelNode rel, CorrelationId primaryId, Iterable<CorrelationId> secondaryIds) {
+        final Set<CorrelationId> secondaries = new HashSet<>();
+        secondaryIds.forEach(secondaries::add);
+        if (secondaries.isEmpty()) {
+            return rel;
+        }
+        final RexShuttle rexShuttle =
+                new RexShuttle() {
+                    @Override
+                    public RexNode visitCorrelVariable(RexCorrelVariable variable) {
+                        if (secondaries.contains(variable.id)) {
+                            return rexBuilder.makeCorrel(variable.getType(), primaryId);
+                        }
+                        return variable;
+                    }
+
+                    @Override
+                    public RexNode visitLambda(RexLambda lambda) {
+                        final RexNode oldBody = lambda.getExpression();
+                        final RexNode newBody = oldBody.accept(this);
+                        if (newBody == oldBody) {
+                            return lambda;
+                        }
+                        return rexBuilder.makeLambdaCall(newBody, lambda.getParameters());
+                    }
+                };
+        return rel.accept(
+                new RelHomogeneousShuttle() {
+                    @Override
+                    public RelNode visit(RelNode other) {
+                        final RelNode visited = super.visit(other);
+                        return visited.accept(rexShuttle);
+                    }
+                });
+    }
+
+    // ----- FLINK MODIFICATION END -----
 
     /**
      * Determines whether a sub-query is non-correlated. Note that a non-correlated sub-query can
@@ -5712,16 +5839,22 @@ public class SqlToRelConverter {
          */
         Pair<RexNode, @Nullable BiFunction<RexNode, String, RexNode>> lookupExp(
                 SqlQualified qualified) {
-            if (nameToNodeMap != null && qualified.prefixLength == 1) {
+            // ----- FLINK MODIFICATION BEGIN -----
+            // Only short-circuit to the name-to-node map when the identifier actually is one of the
+            // bound names (e.g. a lambda parameter). Otherwise fall through to the regular input
+            // resolution below, so that a lambda body can close over the columns of the enclosing
+            // query (which are reachable through the blackboard's inputs). The original Calcite
+            // code threw an AssertionError here for any name not present in the map.
+            //
+            // CALCITE-6242 (fixVersion 1.43.0) makes the same fall-through upstream (guarded on
+            // "scope instanceof SqlLambdaScope"); remove this block after upgrading to 1.43.0.
+            if (nameToNodeMap != null
+                    && qualified.prefixLength == 1
+                    && nameToNodeMap.containsKey(qualified.identifier.names.get(0))) {
                 RexNode node = nameToNodeMap.get(qualified.identifier.names.get(0));
-                if (node == null) {
-                    throw new AssertionError(
-                            "Unknown identifier '"
-                                    + qualified.identifier
-                                    + "' encountered while expanding expression");
-                }
                 return Pair.of(node, null);
             }
+            // ----- FLINK MODIFICATION END -----
             final SqlNameMatcher nameMatcher =
                     scope.getValidator().getCatalogReader().nameMatcher();
             final SqlValidatorScope.ResolvedImpl resolved = new SqlValidatorScope.ResolvedImpl();
@@ -5741,6 +5874,27 @@ public class SqlToRelConverter {
             // preserved.
             final SqlValidatorScope ancestorScope = resolve.scope;
             boolean isParent = ancestorScope != scope;
+            // ----- FLINK MODIFICATION BEGIN -----
+            // A lambda body shares the row of its enclosing query: the lambda blackboard is rooted
+            // at the enclosing inputs (see convertLambda), so a column resolved by crossing only
+            // lambda scopes -- but staying within the same query block -- is a direct input
+            // reference of the current row, not a correlated one. Treating it as an input reference
+            // makes it a plain RexInputRef (as for a normal column), which the
+            // higher-order-function capture lifting can then hoist out of the (closed) lambda.
+            //
+            // A reference that crosses a SQL query boundary (e.g. a lambda body in a scalar
+            // subquery referencing an outer query column) must NOT be flattened this way; it has to
+            // keep Calcite's normal correlated DeferredLookup/RexCorrelVariable path. Only strip
+            // consecutive lambda scopes and check whether the resolved ancestor is the enclosing
+            // query block.
+            //
+            // Residual after CALCITE-6242 (fixVersion 1.43.0): upstream sets isParent = false for
+            // *any* resolution from a lambda scope with inputs, which also swallows the
+            // cross-query-boundary case and so loses the correlation.
+            if (isParent && isSameQueryLambdaCapture(scope, ancestorScope)) {
+                isParent = false;
+            }
+            // ----- FLINK MODIFICATION END -----
             if ((inputs != null) && !isParent) {
                 final LookupContext rels = new LookupContext(this, inputs, systemFieldList.size());
                 final RexNode node = lookup(resolve.path.steps().get(0).i, rels);
@@ -5802,6 +5956,30 @@ public class SqlToRelConverter {
                 }
             }
         }
+
+        // ----- FLINK MODIFICATION BEGIN -----
+        /**
+         * Returns whether {@code ancestorScope} is the query block that directly encloses the
+         * (possibly nested) lambda scope {@code scope}, i.e. the identifier was captured by
+         * crossing only lambda scopes and not a SQL query boundary. Consecutive lambda scopes are
+         * stripped; the first non-lambda scope must be the resolved ancestor. This is a Flink
+         * extension for FLINK-31207 (higher-order functions and lambdas), and is residual after
+         * CALCITE-6242 (fixVersion 1.43.0), which unconditionally treats any resolution from a
+         * lambda scope as local and therefore drops the correlation of a lambda body that captures
+         * across a query boundary.
+         */
+        private boolean isSameQueryLambdaCapture(
+                SqlValidatorScope scope, SqlValidatorScope ancestorScope) {
+            SqlValidatorScope current = scope;
+            boolean crossedLambda = false;
+            while (current instanceof SqlLambdaScope) {
+                crossedLambda = true;
+                current = ((DelegatingScope) current).getParent();
+            }
+            return crossedLambda && current == ancestorScope;
+        }
+
+        // ----- FLINK MODIFICATION END -----
 
         /**
          * Creates an expression with which to reference the expression whose offset in its
