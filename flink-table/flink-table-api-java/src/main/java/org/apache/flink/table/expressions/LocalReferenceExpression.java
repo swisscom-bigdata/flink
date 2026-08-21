@@ -18,7 +18,7 @@
 
 package org.apache.flink.table.expressions;
 
-import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.table.operations.QueryOperation;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.utils.EncodingUtils;
@@ -30,9 +30,10 @@ import java.util.Objects;
 
 /**
  * Reference to entity local to a certain {@link QueryOperation}. That entity does not come from any
- * of the Operations input. It might be for example a group window in window aggregation.
+ * of the Operations input. It might be for example a group window in window aggregation, or a
+ * parameter of a {@link LambdaExpression}.
  */
-@Internal
+@PublicEvolving
 public class LocalReferenceExpression implements ResolvedExpression {
 
     private final String name;

@@ -107,9 +107,38 @@ SELECT ARRAY_TRANSFORM(vals, x -> x + (SELECT MAX(base) FROM t)) FROM t;
 但这些构造不能作用于 lambda 的*参数*：参数是单个元素而不是一组行，因此
 `ARRAY_TRANSFORM(vals, x -> SUM(x))` 会导致校验错误。若要折叠数组自身的元素，请使用 `ARRAY_REDUCE`。
 表函数同样不能出现在函数体中，因为它产生的是行而不是值；异步标量函数也不能，因为它的结果在函数体求值完成之后才会返回。
+Table API 遵循相同的规则（它没有子查询表达式）。
 
 lambda 只能作为高阶函数的参数使用，用在其它位置会导致校验错误。lambda 不是值：它不能存储在列中，
 不能赋值给变量，也不能作为查询结果返回。
+
+在 Table API 中，这些函数以表达式方法的形式提供，接收宿主语言的 lambda。该 lambda 接收 lambda 参数对应的
+表达式，并返回函数体表达式：
+
+{{< tabs "higher-order-functions" >}}
+{{< tab "Java" >}}
+```java
+table.select(
+    $("vals").arrayTransform(x -> x.times(10)),
+    $("vals").arrayFilter(x -> x.isGreater(1)),
+    $("vals").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
+    // lambda 函数体可以捕获其它列
+    $("vals").arrayTransform(x -> x.plus($("base"))),
+    $("m").mapTransformValues((k, v) -> v.times(10)));
+```
+{{< /tab >}}
+{{< tab "Python" >}}
+```python
+table.select(
+    col("vals").array_transform(lambda x: x * 10),
+    col("vals").array_filter(lambda x: x > 1),
+    col("vals").array_reduce(lit(0), lambda acc, x: acc + x),
+    # lambda 函数体可以捕获其它列
+    col("vals").array_transform(lambda x: x + col("base")),
+    col("m").map_transform_values(lambda k, v: v * 10))
+```
+{{< /tab >}}
+{{< /tabs >}}
 
 {{< sql_functions_zh "higherorder" >}}
 

@@ -31,10 +31,17 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Requires every built-in function that takes a lambda to be tested for what it computes.
+ * Requires every built-in function that takes a lambda to be tested for <b>both</b> what it
+ * computes and what it rejects.
  *
- * <p>The expected set is derived from {@link LambdaBuiltInFunctions}, so a newly added higher-order
- * function is covered without extending this test — it simply starts failing until its cases exist.
+ * <p>The two are asserted independently because they fail independently: a function can validate
+ * its arguments correctly and still compute the wrong result, and it can compute correctly for the
+ * calls someone thought to try while accepting calls it should have rejected. A single "is it
+ * tested at all" check would let either half go missing.
+ *
+ * <p>Both expected sets are derived from {@link LambdaBuiltInFunctions}, so a newly added
+ * higher-order function is covered without extending this test — it simply starts failing until its
+ * cases exist.
  *
  * <p>Restore and serde coverage is deliberately <b>not</b> checked per function. Those fixtures pin
  * the serialized lambda representation, which is identical for every higher-order function and for
@@ -59,6 +66,22 @@ class HigherOrderFunctionCoverageTest {
                                 + "cases in %s, declared with TestSetSpec.forFunction(...) so that "
                                 + "the function under test is recorded.",
                         HigherOrderFunctionsITCase.class.getSimpleName())
+                .isEmpty();
+    }
+
+    @Test
+    void testEveryLambdaFunctionHasValidationCoverage() {
+        final Set<String> tested =
+                HigherOrderFunctionValidationParityTest.cases()
+                        .map(c -> c.getDefinition().getName())
+                        .collect(Collectors.toSet());
+
+        assertThat(missingFrom(tested))
+                .as(
+                        "Every built-in function that declares a lambda argument needs at least one "
+                                + "invalid call in %s, which asserts that both the SQL and the Table "
+                                + "API surface reject it.",
+                        HigherOrderFunctionValidationParityTest.class.getSimpleName())
                 .isEmpty();
     }
 

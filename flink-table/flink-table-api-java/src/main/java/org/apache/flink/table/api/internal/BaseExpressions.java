@@ -34,10 +34,14 @@ import org.apache.flink.table.expressions.TimeIntervalUnit;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.UnresolvedDataType;
+import org.apache.flink.util.function.TriFunction;
 
 import java.util.Arrays;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
+import static org.apache.flink.table.api.internal.HigherOrderFunctionCalls.lambdaCall;
 import static org.apache.flink.table.expressions.ApiExpressionUtils.MILLIS_PER_DAY;
 import static org.apache.flink.table.expressions.ApiExpressionUtils.MILLIS_PER_HOUR;
 import static org.apache.flink.table.expressions.ApiExpressionUtils.MILLIS_PER_MINUTE;
@@ -60,15 +64,19 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_DISTINCT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_ELEMENT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_EXCEPT;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_FILTER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_INTERSECT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_MAX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_MIN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_POSITION;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_PREPEND;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REDUCE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REMOVE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REVERSE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_SLICE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_TRANSFORM;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_UNION;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_ZIP_WITH;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASCII;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASIN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.AT;
@@ -162,9 +170,13 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LPAD;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LTRIM;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAKE_VALID_UTF8;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_ENTRIES;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_FILTER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_KEYS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_TRANSFORM_KEYS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_TRANSFORM_VALUES;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_UNION;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_VALUES;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_ZIP_WITH;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MD5;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MIN;
@@ -330,6 +342,78 @@ public abstract class BaseExpressions<InType, OutType> {
     public OutType arrayIntersect(InType array) {
         return toApiSpecificExpression(
                 unresolvedCall(ARRAY_INTERSECT, toExpr(), objectToExpression(array)));
+    }
+
+    /**
+     * Returns a new array by applying the given lambda to each element, preserving the order.
+     * Returns {@code NULL} for a {@code NULL} input array.
+     */
+    public OutType arrayTransform(Function<OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_TRANSFORM, lambdaFunction);
+    }
+
+    /**
+     * Returns a new array with only the elements for which the given predicate lambda returns
+     * {@code TRUE}. Returns {@code NULL} for a {@code NULL} input array.
+     */
+    public OutType arrayFilter(Function<OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_FILTER, lambdaFunction);
+    }
+
+    /**
+     * Applies a left fold to the input array: the merge lambda {@code (acc, element)} is applied to
+     * each element in order, starting from {@code initialValue} which is returned for empty arrays.
+     * Returns {@code NULL} for a {@code NULL} input array.
+     */
+    public OutType arrayReduce(
+            InType initialValue, BiFunction<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_REDUCE, lambdaFunction, objectToExpression(initialValue));
+    }
+
+    /**
+     * Combines this array and {@code array} element-wise by applying the given lambda to the pair
+     * at each position. The shorter array is padded with {@code NULL}. Returns {@code NULL} if
+     * either array is {@code NULL}.
+     */
+    public OutType arrayZipWith(
+            InType array, BiFunction<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_ZIP_WITH, lambdaFunction, objectToExpression(array));
+    }
+
+    /**
+     * Returns a new map with only the entries for which the given predicate lambda {@code (key,
+     * value)} returns {@code TRUE}. Returns {@code NULL} for a {@code NULL} input map.
+     */
+    public OutType mapFilter(BiFunction<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_FILTER, lambdaFunction);
+    }
+
+    /**
+     * Returns a new map with each key replaced by the given lambda {@code (key, value)}, leaving
+     * the values unchanged. A new key that is {@code NULL} or duplicates another key fails the
+     * query. Returns {@code NULL} for a {@code NULL} input map.
+     */
+    public OutType mapTransformKeys(BiFunction<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_TRANSFORM_KEYS, lambdaFunction);
+    }
+
+    /**
+     * Returns a new map with each value replaced by the given lambda {@code (key, value)}, leaving
+     * the keys unchanged. Returns {@code NULL} for a {@code NULL} input map.
+     */
+    public OutType mapTransformValues(BiFunction<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_TRANSFORM_VALUES, lambdaFunction);
+    }
+
+    /**
+     * Merges this map and {@code map} over the union of their keys by applying the given lambda
+     * {@code (key, value1, value2)}, passing {@code NULL} where a key is absent from a map. Both
+     * key types are generalized to their common type. Returns {@code NULL} if either map is {@code
+     * NULL}.
+     */
+    public OutType mapZipWith(
+            InType map, TriFunction<OutType, OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_ZIP_WITH, lambdaFunction, objectToExpression(map));
     }
 
     /**

@@ -21,19 +21,24 @@ package org.apache.flink.table.expressions.resolver.rules;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.CompositeType;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.connector.ChangelogMode;
+import org.apache.flink.table.expressions.ApiExpressionUtils;
 import org.apache.flink.table.expressions.CallExpression;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.ExpressionUtils;
 import org.apache.flink.table.expressions.FieldReferenceExpression;
+import org.apache.flink.table.expressions.LambdaExpression;
+import org.apache.flink.table.expressions.LocalReferenceExpression;
 import org.apache.flink.table.expressions.ModelReferenceExpression;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.TableReferenceExpression;
 import org.apache.flink.table.expressions.TypeLiteralExpression;
 import org.apache.flink.table.expressions.UnresolvedCallExpression;
+import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
 import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.functions.AggregateFunctionDefinition;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
@@ -49,8 +54,14 @@ import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.functions.UserDefinedFunctionHelper;
 import org.apache.flink.table.operations.PartitionQueryOperation;
 import org.apache.flink.table.operations.QueryOperation;
+import org.apache.flink.table.operations.utils.OperationExpressionsUtils;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.InputTypeStrategy;
+import org.apache.flink.table.types.inference.LambdaInfo;
+import org.apache.flink.table.types.inference.LambdaInputTypeStrategy;
+import org.apache.flink.table.types.inference.LambdaTypeValidation;
+import org.apache.flink.table.types.inference.RefinableLambdaInputTypeStrategy;
 import org.apache.flink.table.types.inference.StaticArgument;
 import org.apache.flink.table.types.inference.StaticArgumentTrait;
 import org.apache.flink.table.types.inference.SystemTypeInference;
@@ -67,6 +78,7 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -149,6 +161,19 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
             final int argCount = adaptedCall.getChildren().size();
 
             for (int i = 0; i < argCount; i++) {
+                final Expression child = adaptedCall.getChildren().get(i);
+                if (child instanceof UnresolvedLambdaExpression) {
+                    // A lambda is resolved with its parameter types bound from the preceding
+                    // (already resolved) arguments of the enclosing higher-order function.
+                    resolvedArgs.add(
+                            resolveLambda(
+                                    functionName,
+                                    definition,
+                                    i,
+                                    (UnresolvedLambdaExpression) child,
+                                    resolvedArgs));
+                    continue;
+                }
                 final SurroundingInfo surroundingInfo;
                 if (typeInference == null) {
                     surroundingInfo = null;
@@ -164,7 +189,7 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
                 }
                 final ResolvingCallVisitor childResolver =
                         new ResolvingCallVisitor(resolutionContext, surroundingInfo);
-                resolvedArgs.addAll(adaptedCall.getChildren().get(i).accept(childResolver));
+                resolvedArgs.addAll(child.accept(childResolver));
             }
 
             if (definition == BuiltInFunctionDefinitions.FLATTEN) {
@@ -185,7 +210,266 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
             if (expression instanceof ResolvedExpression) {
                 return Collections.singletonList((ResolvedExpression) expression);
             }
+            if (expression instanceof UnresolvedLambdaExpression) {
+                // a lambda is resolved by its enclosing call (see visit(UnresolvedCallExpression));
+                // reaching this point means it is not an argument of a higher-order function
+                throw new ValidationException(
+                        String.format(
+                                "Unexpected lambda expression: %s. A lambda expression is only "
+                                        + "supported as an argument of a function that declares a "
+                                        + "lambda argument at this position.",
+                                expression));
+            }
             throw new TableException("Unexpected unresolved expression: " + expression);
+        }
+
+        /**
+         * Resolves a lambda argument of a higher-order function. The parameter types are bound from
+         * the already resolved sibling arguments and the body is resolved in a scope containing the
+         * parameters.
+         */
+        private ResolvedExpression resolveLambda(
+                String functionName,
+                FunctionDefinition definition,
+                int lambdaPos,
+                UnresolvedLambdaExpression lambda,
+                List<ResolvedExpression> precedingArgs) {
+            List<DataType> parameterTypes =
+                    inferLambdaParameterTypes(functionName, definition, lambdaPos, precedingArgs);
+            final List<String> names = lambda.getParameterNames();
+            if (names.size() != parameterTypes.size()) {
+                throw new ValidationException(
+                        String.format(
+                                "The lambda expression expects %d parameter(s) but %d were "
+                                        + "provided.",
+                                parameterTypes.size(), names.size()));
+            }
+            List<LocalReferenceExpression> parameters =
+                    buildLambdaParameters(names, parameterTypes);
+            ResolvedExpression body =
+                    resolutionContext.resolveLambdaBody(lambda.getBody(), parameters);
+            // Give the input type strategy a single, monotonic feedback pass: it may refine the
+            // parameter types now that the body type is known (ARRAY_REDUCE widens the accumulator
+            // parameter to nullable once the reducer body is nullable). If it does, re-resolve the
+            // original body with rebuilt local references so the refined types take effect.
+            final Optional<List<DataType>> adjusted =
+                    adjustLambdaParameterTypes(
+                            functionName,
+                            definition,
+                            lambdaPos,
+                            precedingArgs,
+                            parameterTypes,
+                            body.getOutputDataType());
+            if (adjusted.isPresent()) {
+                parameterTypes = adjusted.get();
+                parameters = buildLambdaParameters(names, parameterTypes);
+                body = resolutionContext.resolveLambdaBody(lambda.getBody(), parameters);
+            }
+            validateLambdaBody(body);
+            return new LambdaExpression(parameters, body);
+        }
+
+        private List<LocalReferenceExpression> buildLambdaParameters(
+                List<String> names, List<DataType> parameterTypes) {
+            return IntStream.range(0, names.size())
+                    .mapToObj(
+                            pos ->
+                                    ApiExpressionUtils.localRef(
+                                            names.get(pos), parameterTypes.get(pos)))
+                    .collect(Collectors.toList());
+        }
+
+        /**
+         * Rejects the constructs that a lambda body cannot contain. A lambda body is compiled into
+         * an expression that is evaluated per element, so an aggregate or OVER window over a lambda
+         * <em>parameter</em> has no meaning: the parameter exists per element and there is no group
+         * to evaluate it over. The same constructs over the columns of the enclosing query are
+         * fine, and do not reach here -- an aggregate is hoisted into the enclosing aggregation
+         * before resolution ({@code OperationExpressionsUtils#extractAggregationsAndProperties}),
+         * and an OVER window resolves against the enclosing scope's windows. A table function
+         * produces rows rather than a value, and an asynchronous function completes its future only
+         * after the per-element expression has been evaluated; both are rejected outright. Mirrors
+         * the check that {@code SqlValidatorImpl#validateLambda} performs for SQL; without it these
+         * would surface as an internal error during expression conversion.
+         */
+        private void validateLambdaBody(ResolvedExpression body) {
+            if (body instanceof CallExpression) {
+                final FunctionDefinition definition =
+                        ((CallExpression) body).getFunctionDefinition();
+                final String construct = unsupportedLambdaBodyConstruct(definition);
+                if (construct != null) {
+                    if (isUnsupportedInLambdaBody(definition)) {
+                        throw new ValidationException(
+                                String.format(
+                                        "%s are not supported in the body of a lambda expression. "
+                                                + "A lambda body must be a scalar expression over "
+                                                + "its parameters and the columns it captures.",
+                                        construct));
+                    }
+                    if (referencesLambdaParameter(body, Collections.emptySet())) {
+                        throw new ValidationException(
+                                OperationExpressionsUtils.unsupportedOverLambdaParameter(
+                                        construct));
+                    }
+                }
+            }
+            body.getResolvedChildren().forEach(this::validateLambdaBody);
+        }
+
+        /**
+         * Whether {@code expression} references a lambda parameter. A lambda nested below it
+         * shadows the parameters it declares: those are bound within it and may legitimately be
+         * aggregated over by an aggregate in between. In a resolved lambda body every {@link
+         * LocalReferenceExpression} is a lambda parameter, of this lambda or of an enclosing one
+         * (see {@code ExpressionResolver#resolveLambdaBody}).
+         */
+        private static boolean referencesLambdaParameter(
+                ResolvedExpression expression, Set<String> shadowed) {
+            if (expression instanceof LocalReferenceExpression) {
+                return !shadowed.contains(((LocalReferenceExpression) expression).getName());
+            }
+            if (expression instanceof LambdaExpression) {
+                final LambdaExpression lambda = (LambdaExpression) expression;
+                final Set<String> nested = new HashSet<>(shadowed);
+                lambda.getParameters().forEach(parameter -> nested.add(parameter.getName()));
+                return referencesLambdaParameter(lambda.getBody(), nested);
+            }
+            return expression.getResolvedChildren().stream()
+                    .anyMatch(child -> referencesLambdaParameter(child, shadowed));
+        }
+
+        /**
+         * The user-facing name of the construct that the given function definition represents in a
+         * lambda body, or {@code null} if it may appear there unconditionally.
+         */
+        private @Nullable String unsupportedLambdaBodyConstruct(FunctionDefinition definition) {
+            if (definition == BuiltInFunctionDefinitions.OVER) {
+                return "OVER windows";
+            }
+            if (isTableFunction(definition)) {
+                return "Table functions";
+            }
+            switch (definition.getKind()) {
+                case AGGREGATE:
+                case TABLE_AGGREGATE:
+                    return "Aggregate functions";
+                case ASYNC_SCALAR:
+                    return "Asynchronous scalar functions";
+                default:
+                    return null;
+            }
+        }
+
+        /**
+         * Whether the construct cannot appear in a lambda body at all, as opposed to only when it
+         * involves a lambda parameter: a table function produces rows rather than a value, and an
+         * asynchronous function completes a future only after the per-element expression that would
+         * consume its result has been evaluated.
+         */
+        private static boolean isUnsupportedInLambdaBody(FunctionDefinition definition) {
+            return isTableFunction(definition) || definition.getKind() == FunctionKind.ASYNC_SCALAR;
+        }
+
+        private static boolean isTableFunction(FunctionDefinition definition) {
+            switch (definition.getKind()) {
+                case TABLE:
+                case ASYNC_TABLE:
+                case PROCESS_TABLE:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /**
+         * Binds the lambda parameter types from the preceding (already resolved) arguments by
+         * consulting the function's {@link LambdaInputTypeStrategy}. This covers both the built-in
+         * higher-order functions and user-defined functions that declare a lambda argument.
+         */
+        private List<DataType> inferLambdaParameterTypes(
+                String functionName,
+                FunctionDefinition definition,
+                int lambdaPos,
+                List<ResolvedExpression> precedingArgs) {
+            final TypeInference inference =
+                    definition.getTypeInference(resolutionContext.typeFactory());
+            final InputTypeStrategy inputTypeStrategy = inference.getInputTypeStrategy();
+            if (inputTypeStrategy instanceof LambdaInputTypeStrategy) {
+                final CallContext callContext =
+                        new TableApiCallContext(
+                                resolutionContext.typeFactory(),
+                                functionName,
+                                definition,
+                                precedingArgs,
+                                resolutionContext.isGroupedAggregation(),
+                                inference.getStaticArguments().orElse(null));
+                final Optional<List<DataType>> parameterTypes =
+                        ((LambdaInputTypeStrategy) inputTypeStrategy)
+                                .getExpectedLambdaParameterTypes(callContext, lambdaPos);
+                if (parameterTypes.isPresent()) {
+                    // Nothing validates the arity a strategy derives on its behalf.
+                    LambdaTypeValidation.checkDerivedParameterTypes(parameterTypes.get());
+                    return parameterTypes.get();
+                }
+            }
+            throw new ValidationException(
+                    String.format(
+                            "Function '%s' does not accept a lambda expression at position %d.",
+                            functionName, lambdaPos));
+        }
+
+        /**
+         * Gives the function's {@link RefinableLambdaInputTypeStrategy} a single feedback pass to
+         * refine the lambda parameter types now that the body has been resolved once (see {@link
+         * RefinableLambdaInputTypeStrategy#adjustLambdaParameterTypes}). Returns an empty optional
+         * when the strategy keeps the current types or does not support refinement at all. The
+         * refinement is internal: a user-supplied {@link LambdaInputTypeStrategy} declares its
+         * parameter types once, so that it behaves identically in SQL and in the Table API.
+         */
+        private Optional<List<DataType>> adjustLambdaParameterTypes(
+                String functionName,
+                FunctionDefinition definition,
+                int lambdaPos,
+                List<ResolvedExpression> precedingArgs,
+                List<DataType> currentParameterTypes,
+                DataType lambdaResultType) {
+            final TypeInference inference =
+                    definition.getTypeInference(resolutionContext.typeFactory());
+            final InputTypeStrategy inputTypeStrategy = inference.getInputTypeStrategy();
+            if (!(inputTypeStrategy instanceof RefinableLambdaInputTypeStrategy)) {
+                return Optional.empty();
+            }
+            final CallContext callContext =
+                    new TableApiCallContext(
+                            resolutionContext.typeFactory(),
+                            functionName,
+                            definition,
+                            precedingArgs,
+                            resolutionContext.isGroupedAggregation(),
+                            inference.getStaticArguments().orElse(null));
+            final Optional<List<DataType>> adjusted =
+                    ((RefinableLambdaInputTypeStrategy) inputTypeStrategy)
+                            .adjustLambdaParameterTypes(
+                                    callContext,
+                                    lambdaPos,
+                                    currentParameterTypes,
+                                    lambdaResultType);
+            adjusted.ifPresent(
+                    types -> {
+                        if (types.size() != currentParameterTypes.size()) {
+                            throw new ValidationException(
+                                    String.format(
+                                            "Invalid input type strategy of function '%s'. The "
+                                                    + "refined lambda parameter types at position "
+                                                    + "%d must have %d parameter(s) but %d were "
+                                                    + "returned.",
+                                            functionName,
+                                            lambdaPos,
+                                            currentParameterTypes.size(),
+                                            types.size()));
+                        }
+                    });
+            return adjusted;
         }
 
         private List<ResolvedExpression> executeFlatten(List<ResolvedExpression> args) {
@@ -509,6 +793,10 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
                     .mapToObj(
                             pos -> {
                                 final ResolvedExpression argument = resolvedArgs.get(pos);
+                                // A lambda argument carries a FUNCTION type and must never be cast.
+                                if (argument instanceof LambdaExpression) {
+                                    return argument;
+                                }
                                 final DataType argumentType = argument.getOutputDataType();
                                 final DataType expectedType =
                                         inferenceResult.getExpectedArgumentTypes().get(pos);
@@ -635,6 +923,29 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
                 return literal.getValueAs(clazz);
             }
             return Optional.empty();
+        }
+
+        @Override
+        public Optional<LambdaInfo> getLambdaArgument(int pos) {
+            if (pos >= resolvedArgs.size()) {
+                return Optional.empty();
+            }
+            final ResolvedExpression arg = resolvedArgs.get(pos);
+            if (!(arg instanceof LambdaExpression)) {
+                return Optional.empty();
+            }
+            final LambdaExpression lambda = (LambdaExpression) arg;
+            final List<DataTypes.Field> parameterFields =
+                    lambda.getParameters().stream()
+                            .map(p -> DataTypes.FIELD(p.getName(), p.getOutputDataType()))
+                            .collect(Collectors.toList());
+            // The body is deliberately withheld during type inference, mirroring the SQL surface
+            // (CallBindingCallContext), where validation has no Expression body to offer. A
+            // function's type inference must therefore derive from the parameter and result types
+            // alone, so that it behaves identically on both surfaces. The body becomes available
+            // during specialization, which happens in the planner for Table API calls too.
+            return Optional.of(
+                    new LambdaInfo(null, parameterFields, lambda.getBody().getOutputDataType()));
         }
 
         @Override

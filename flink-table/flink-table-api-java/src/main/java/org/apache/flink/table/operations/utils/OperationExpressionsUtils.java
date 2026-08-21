@@ -19,6 +19,7 @@
 package org.apache.flink.table.operations.utils;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.expressions.CallExpression;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.FieldReferenceExpression;
@@ -28,6 +29,8 @@ import org.apache.flink.table.expressions.ModelReferenceExpression;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.TableReferenceExpression;
 import org.apache.flink.table.expressions.UnresolvedCallExpression;
+import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
+import org.apache.flink.table.expressions.UnresolvedReferenceExpression;
 import org.apache.flink.table.expressions.utils.ApiExpressionDefaultVisitor;
 import org.apache.flink.table.expressions.utils.ResolvedExpressionDefaultVisitor;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
@@ -117,6 +120,13 @@ public class OperationExpressionsUtils {
      * Extracts and deduplicates all aggregation and window property expressions (zero, one, or
      * more) from the given expressions.
      *
+     * <p>The body of a lambda argument is descended into as well, although {@link
+     * UnresolvedLambdaExpression#getChildren()} hides it from generic traversals: an aggregate
+     * written there (e.g. {@code a.arrayTransform(x -> x.plus($("base").sum()))}) aggregates over
+     * the enclosing query, not over the array, and so belongs to the enclosing aggregation.
+     * Hoisting it out leaves the body capturing an ordinary column of the aggregation's output. An
+     * aggregate over a lambda <em>parameter</em> has no such reading and is rejected outright.
+     *
      * @param expressions a list of expressions to extract
      * @return a Tuple2, the first field contains the extracted and deduplicated aggregations, and
      *     the second field contains the extracted and deduplicated window properties.
@@ -154,6 +164,9 @@ public class OperationExpressionsUtils {
         private final Map<Expression, String> aggregates = new LinkedHashMap<>();
         private final Map<Expression, String> properties = new LinkedHashMap<>();
 
+        /** Lambda parameters in scope at the node currently being visited. */
+        private final Set<String> lambdaParameters = new HashSet<>();
+
         @Override
         public Void visit(LookupCallExpression unresolvedCall) {
             throw new IllegalStateException(
@@ -164,6 +177,15 @@ public class OperationExpressionsUtils {
         public Void visit(UnresolvedCallExpression unresolvedCall) {
             FunctionDefinition functionDefinition = unresolvedCall.getFunctionDefinition();
             if (isFunctionOfKind(unresolvedCall, AGGREGATE)) {
+                // An aggregate over a lambda parameter is not an aggregate of the enclosing query
+                // and has no meaning of its own. Reported here rather than left to the lambda body
+                // validation, which runs after the projection has been resolved against the
+                // aggregation's output -- by then the columns the aggregate also references are
+                // gone and the failure would be an unhelpful "cannot resolve field".
+                if (referencesLambdaParameter(unresolvedCall, lambdaParameters)) {
+                    throw new ValidationException(
+                            unsupportedOverLambdaParameter("Aggregate functions"));
+                }
                 aggregates.computeIfAbsent(unresolvedCall, expr -> "EXPR$" + uniqueId++);
             } else if (WINDOW_PROPERTIES.contains(functionDefinition)) {
                 properties.computeIfAbsent(unresolvedCall, expr -> "EXPR$" + uniqueId++);
@@ -174,9 +196,69 @@ public class OperationExpressionsUtils {
         }
 
         @Override
+        public Void visitNonApiExpression(Expression other) {
+            if (other instanceof UnresolvedLambdaExpression) {
+                final UnresolvedLambdaExpression lambda = (UnresolvedLambdaExpression) other;
+                final List<String> declared =
+                        lambda.getParameterNames().stream()
+                                .filter(lambdaParameters::add)
+                                .collect(Collectors.toList());
+                lambda.getBody().accept(this);
+                lambdaParameters.removeAll(declared);
+            }
+            return null;
+        }
+
+        @Override
         protected Void defaultMethod(Expression expression) {
             return null;
         }
+    }
+
+    /**
+     * The error reported when a row-level construct in a lambda body is evaluated over a lambda
+     * parameter. Shared with the lambda body validation in {@code ResolveCallByArgumentsRule},
+     * which catches the cases that do not pass through aggregate extraction.
+     *
+     * <p>Unlike SQL, the message does not name the offending parameter: a Table API lambda
+     * parameter carries a generated name (see {@code BaseExpressions#newLambdaParameterName}) that
+     * would mean nothing to the reader.
+     *
+     * @param construct the user-facing name of the construct, e.g. {@code "Aggregate functions"}
+     */
+    public static String unsupportedOverLambdaParameter(String construct) {
+        return String.format(
+                "%s over a lambda parameter are not supported in the body of a lambda expression. "
+                        + "A lambda parameter exists per element and has no group to be evaluated "
+                        + "over; only the columns of the enclosing query can be used here.",
+                construct);
+    }
+
+    /**
+     * Whether {@code expression} references one of the given lambda parameters. A lambda nested
+     * below it shadows the parameters it redeclares, and its own parameters do not count: they are
+     * bound within it, so an aggregate in between still aggregates over the enclosing query.
+     *
+     * <p>Called before resolution, where a lambda parameter is an ordinary {@link
+     * org.apache.flink.table.expressions.UnresolvedReferenceExpression} and can only be told from a
+     * column by its name.
+     */
+    static boolean referencesLambdaParameter(Expression expression, Set<String> lambdaParameters) {
+        if (lambdaParameters.isEmpty()) {
+            return false;
+        }
+        if (expression instanceof UnresolvedReferenceExpression) {
+            return lambdaParameters.contains(
+                    ((UnresolvedReferenceExpression) expression).getName());
+        }
+        if (expression instanceof UnresolvedLambdaExpression) {
+            final UnresolvedLambdaExpression lambda = (UnresolvedLambdaExpression) expression;
+            final Set<String> shadowed = new HashSet<>(lambdaParameters);
+            shadowed.removeAll(lambda.getParameterNames());
+            return referencesLambdaParameter(lambda.getBody(), shadowed);
+        }
+        return expression.getChildren().stream()
+                .anyMatch(child -> referencesLambdaParameter(child, lambdaParameters));
     }
 
     private static class AggregationAndPropertiesReplacer
@@ -215,6 +297,18 @@ public class OperationExpressionsUtils {
                             .map(c -> c.accept(this))
                             .collect(Collectors.toList());
             return unresolvedCall.replaceArgs(args);
+        }
+
+        @Override
+        public Expression visitNonApiExpression(Expression other) {
+            if (other instanceof UnresolvedLambdaExpression) {
+                final UnresolvedLambdaExpression lambda = (UnresolvedLambdaExpression) other;
+                final Expression newBody = lambda.getBody().accept(this);
+                if (newBody != lambda.getBody()) {
+                    return new UnresolvedLambdaExpression(lambda.getParameterNames(), newBody);
+                }
+            }
+            return other;
         }
 
         @Override

@@ -25,14 +25,21 @@ import org.apache.flink.util.CollectionUtil;
 import java.math.BigDecimal;
 import java.util.stream.Stream;
 
+import static org.apache.flink.table.api.Expressions.$;
+import static org.apache.flink.table.api.Expressions.array;
+import static org.apache.flink.table.api.Expressions.ifThenElse;
+import static org.apache.flink.table.api.Expressions.lit;
+import static org.apache.flink.table.api.Expressions.map;
+import static org.apache.flink.table.api.Expressions.nullOf;
 import static org.apache.flink.util.CollectionUtil.entry;
 
 /**
  * Tests for the built-in array and map higher-order functions ({@code ARRAY_TRANSFORM}, {@code
  * ARRAY_FILTER}, {@code ARRAY_REDUCE}, {@code ARRAY_ZIP_WITH}, {@code MAP_FILTER}, {@code
  * MAP_TRANSFORM_KEYS}, {@code MAP_TRANSFORM_VALUES} and {@code MAP_ZIP_WITH}), which take a lambda
- * argument. These run in streaming mode; {@link HigherOrderFunctionsBatchITCase} covers the same
- * functions in batch mode.
+ * argument. Both the SQL and the Table API (host-language lambda) surfaces are covered. These run
+ * in streaming mode; {@link HigherOrderFunctionsBatchITCase} covers the same functions in batch
+ * mode.
  */
 class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
 
@@ -70,22 +77,26 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.ARRAY(DataTypes.STRING().notNull()),
                                 DataTypes.INT(),
                                 DataTypes.INT())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(x -> x.times(10)),
                                 "ARRAY_TRANSFORM(f0, x -> x * 10)",
                                 new Integer[] {10, 20, 30},
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // NULL array -> NULL
-                        .testSqlResult(
+                        .testResult(
+                                $("f1").arrayTransform(x -> x.times(10)),
                                 "ARRAY_TRANSFORM(f1, x -> x * 10)",
                                 null,
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // NULL element is passed to the lambda and kept
-                        .testSqlResult(
+                        .testResult(
+                                $("f2").arrayTransform(x -> x.times(10)),
                                 "ARRAY_TRANSFORM(f2, x -> x * 10)",
                                 new Integer[] {10, null, 30},
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // result element type differs from the input element type
-                        .testSqlResult(
+                        .testResult(
+                                $("f3").arrayTransform(s -> s.charLength()),
                                 "ARRAY_TRANSFORM(f3, s -> CHAR_LENGTH(s))",
                                 new Integer[] {1, 2, 3},
                                 DataTypes.ARRAY(DataTypes.INT().notNull()))
@@ -93,9 +104,10 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // parameter: the parameter is transiently unresolved (a plain ANY) while
                         // the
                         // enclosing ARRAY_TRANSFORM binds it, so IFNULL's operand/return inference
-                        // must defer rather than fail with "Type is not supported: ANY"
-                        // (f2 = {1, null, 3}).
-                        .testSqlResult(
+                        // must defer rather than fail with "Type is not supported: ANY". Covers the
+                        // SQL, Table API, and API-rendered-as-SQL surfaces (f2 = {1, null, 3}).
+                        .testResult(
+                                $("f2").arrayTransform(x -> x.ifNull(0)),
                                 "ARRAY_TRANSFORM(f2, x -> IFNULL(x, 0))",
                                 new Integer[] {1, 0, 3},
                                 DataTypes.ARRAY(DataTypes.INT().notNull()))
@@ -109,16 +121,19 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                                         .notNull())
                                         .notNull())
                         // the lambda body closes over an outer column (f4 = 100)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(x -> x.plus($("f4"))),
                                 "ARRAY_TRANSFORM(f0, x -> x + f4)",
                                 new Integer[] {101, 102, 103},
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // closing over two distinct outer columns (f4 = 100, f5 = 1000)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(x -> x.plus($("f4")).plus($("f5"))),
                                 "ARRAY_TRANSFORM(f0, x -> x + f4 + f5)",
                                 new Integer[] {1101, 1102, 1103},
                                 DataTypes.ARRAY(DataTypes.INT()))
-                        // a lambda parameter shadows an outer column of the same name
+                        // a lambda parameter shadows an outer column of the same name (SQL only,
+                        // since the Table API generates lambda parameter names automatically)
                         .testSqlResult(
                                 "ARRAY_TRANSFORM(f0, f4 -> f4 + 1)",
                                 new Integer[] {2, 3, 4},
@@ -146,7 +161,8 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.INT())
                         // an inner lambda closes over the enclosing lambda's parameter (both
                         // surfaces)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(a -> a.arrayTransform(x -> x.plus(a.at(1)))),
                                 "ARRAY_TRANSFORM(f0, a -> ARRAY_TRANSFORM(a, x -> x + a[1]))",
                                 new Integer[][] {new Integer[] {2, 3}, new Integer[] {6, 7}},
                                 DataTypes.ARRAY(DataTypes.ARRAY(DataTypes.INT()).notNull()))
@@ -175,13 +191,20 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                                         .notNull())
                                         .notNull())
                         // a nested capture combined with an outer-column capture (f1 = 1000)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(
+                                                a ->
+                                                        a.arrayTransform(
+                                                                x ->
+                                                                        x.plus(a.at(1))
+                                                                                .plus($("f1")))),
                                 "ARRAY_TRANSFORM(f0, a -> ARRAY_TRANSFORM(a, x -> x + a[1] + f1))",
                                 new Integer[][] {
                                     new Integer[] {1002, 1003}, new Integer[] {1006, 1007}
                                 },
                                 DataTypes.ARRAY(DataTypes.ARRAY(DataTypes.INT()).notNull()))
-                        // an inner parameter shadows the enclosing parameter of the same name
+                        // an inner parameter shadows the enclosing parameter of the same name (SQL
+                        // only, since the Table API generates lambda parameter names automatically)
                         .testSqlResult(
                                 "ARRAY_TRANSFORM(ARRAY[ARRAY[1, 2], ARRAY[3, 4]], "
                                         + "a -> ARRAY_TRANSFORM(a, a -> a + 1))",
@@ -202,22 +225,26 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.ARRAY(DataTypes.INT()),
                                 DataTypes.ARRAY(DataTypes.INT()),
                                 DataTypes.INT())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayFilter(x -> x.isGreater(2)),
                                 "ARRAY_FILTER(f0, x -> x > 2)",
                                 new Integer[] {3, 4},
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // the predicate closes over an outer column (f3 = 2)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayFilter(x -> x.isGreater($("f3"))),
                                 "ARRAY_FILTER(f0, x -> x > f3)",
                                 new Integer[] {3, 4},
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // NULL array -> NULL
-                        .testSqlResult(
+                        .testResult(
+                                $("f1").arrayFilter(x -> x.isGreater(2)),
                                 "ARRAY_FILTER(f1, x -> x > 2)",
                                 null,
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // a NULL predicate result excludes the element
-                        .testSqlResult(
+                        .testResult(
+                                $("f2").arrayFilter(x -> x.isGreater(0)),
                                 "ARRAY_FILTER(f2, x -> x > 0)",
                                 new Integer[] {1, 3},
                                 DataTypes.ARRAY(DataTypes.INT())));
@@ -233,19 +260,28 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.ARRAY(DataTypes.INT()),
                                 DataTypes.ARRAY(DataTypes.STRING().notNull()),
                                 DataTypes.INT())
-                        .testSqlResult(
-                                "ARRAY_REDUCE(f0, 0, (acc, x) -> acc + x)", 6, DataTypes.INT())
+                        .testResult(
+                                $("f0").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
+                                "ARRAY_REDUCE(f0, 0, (acc, x) -> acc + x)",
+                                6,
+                                DataTypes.INT())
                         // the merge lambda closes over an outer column (f3 = 10), added once per
                         // element on top of the running accumulator
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(lit(0), (acc, x) -> acc.plus(x).plus($("f3"))),
                                 "ARRAY_REDUCE(f0, 0, (acc, x) -> acc + x + f3)",
                                 36,
                                 DataTypes.INT())
                         // NULL array -> NULL
-                        .testSqlResult(
-                                "ARRAY_REDUCE(f1, 0, (acc, x) -> acc + x)", null, DataTypes.INT())
+                        .testResult(
+                                $("f1").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
+                                "ARRAY_REDUCE(f1, 0, (acc, x) -> acc + x)",
+                                null,
+                                DataTypes.INT())
                         // empty array (produced by a filter) -> initial accumulator
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayFilter(x -> x.isGreater(100))
+                                        .arrayReduce(lit(100), (acc, x) -> acc.plus(x)),
                                 "ARRAY_REDUCE(ARRAY_FILTER(f0, x -> x > 100), 100, "
                                         + "(acc, x) -> acc + x)",
                                 100,
@@ -263,11 +299,16 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_REDUCE)
                         .onFieldsWithData((Object) new Integer[] {1, 2, 3})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(
+                                                lit(new BigDecimal("0.00"))
+                                                        .cast(DataTypes.DECIMAL(12, 2)),
+                                                (acc, x) -> x),
                                 "ARRAY_REDUCE(f0, CAST(0 AS DECIMAL(12, 2)), (acc, x) -> x)",
                                 new BigDecimal("3.00"),
                                 DataTypes.DECIMAL(12, 2).notNull())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(lit(0L), (acc, x) -> x),
                                 "ARRAY_REDUCE(f0, CAST(0 AS BIGINT), (acc, x) -> x)",
                                 3L,
                                 DataTypes.BIGINT().notNull()),
@@ -295,18 +336,31 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_REDUCE)
                         .onFieldsWithData((Object) new Integer[] {1, 2})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(
+                                                lit(0),
+                                                (acc, x) ->
+                                                        ifThenElse(
+                                                                x.isEqual(1),
+                                                                nullOf(DataTypes.INT()),
+                                                                ifThenElse(
+                                                                        acc.isNull(),
+                                                                        lit(99),
+                                                                        acc))),
                                 "ARRAY_REDUCE(f0, 0, (acc, x) -> CASE WHEN x = 1 THEN NULL "
                                         + "WHEN acc IS NULL THEN 99 ELSE acc END)",
                                 99,
                                 DataTypes.INT().nullable())
                         // a reducer that never returns NULL keeps a NOT NULL accumulator and result
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
                                 "ARRAY_REDUCE(f0, 0, (acc, x) -> acc + x)",
                                 3,
                                 DataTypes.INT().notNull())
                         // a nullable initial accumulator yields a nullable result
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(
+                                                nullOf(DataTypes.INT()), (acc, x) -> acc.plus(x)),
                                 "ARRAY_REDUCE(f0, CAST(NULL AS INT), (acc, x) -> acc + x)",
                                 null,
                                 DataTypes.INT().nullable()),
@@ -320,7 +374,12 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_REDUCE)
                         .onFieldsWithData((Object) new Integer[] {1, 2, 3})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(
+                                                lit(0).cast(DataTypes.DECIMAL(10, 2)),
+                                                (acc, x) ->
+                                                        acc.plus(x.cast(DataTypes.DECIMAL(5, 0)))
+                                                                .cast(DataTypes.DECIMAL(10, 2))),
                                 "ARRAY_REDUCE(f0, CAST(0 AS DECIMAL(10, 2)), "
                                         + "(acc, x) -> CAST(acc + CAST(x AS DECIMAL(5, 0)) "
                                         + "AS DECIMAL(10, 2)))",
@@ -341,23 +400,27 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // element-wise combine; the shorter array is padded with NULL, so the
                         // result length is max(len1, len2) and the padded position (index 2, where
                         // f1 has no element) passes NULL, making x + y NULL there
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayZipWith($("f1"), (x, y) -> x.plus(y)),
                                 "ARRAY_ZIP_WITH(f0, f1, (x, y) -> x + y)",
                                 new Integer[] {11, 22, null},
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // the lambda closes over an outer column (f3 = 100)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayZipWith($("f1"), (x, y) -> x.plus(y).plus($("f3"))),
                                 "ARRAY_ZIP_WITH(f0, f1, (x, y) -> x + y + f3)",
                                 new Integer[] {111, 122, null},
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // NULL array -> NULL
-                        .testSqlResult(
+                        .testResult(
+                                $("f2").arrayZipWith($("f1"), (x, y) -> x.plus(y)),
                                 "ARRAY_ZIP_WITH(f2, f1, (x, y) -> x + y)",
                                 null,
                                 DataTypes.ARRAY(DataTypes.INT()))
                         // the combine changes the element logical type (INT -> BIGINT); the output
                         // array element type must follow the lambda body type
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayZipWith($("f1"), (x, y) -> x.cast(DataTypes.BIGINT())),
                                 "ARRAY_ZIP_WITH(f0, f1, (x, y) -> CAST(x AS BIGINT))",
                                 new Long[] {1L, 2L, 3L},
                                 DataTypes.ARRAY(DataTypes.BIGINT())));
@@ -371,28 +434,32 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
                                 DataTypes.INT())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapFilter((k, v) -> v.isGreater(1)),
                                 "MAP_FILTER(f0, (k, v) -> v > 1)",
                                 CollectionUtil.map(entry("b", 2)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // the predicate closes over an outer column (f2 = 1)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapFilter((k, v) -> v.isGreater($("f2"))),
                                 "MAP_FILTER(f0, (k, v) -> v > f2)",
                                 CollectionUtil.map(entry("b", 2)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // NULL map -> NULL
-                        .testSqlResult(
+                        .testResult(
+                                $("f1").mapFilter((k, v) -> v.isGreater(1)),
                                 "MAP_FILTER(f1, (k, v) -> v > 1)",
                                 null,
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
                 // A predicate that evaluates to NULL (here because the value is NULL) excludes the
-                // entry, matching ARRAY_FILTER. MAP_FILTER uses a separate generated loop, so it
-                // is covered explicitly.
+                // entry, matching ARRAY_FILTER. MAP_FILTER uses a separate generated loop, so it is
+                // covered explicitly on both SQL and Table API.
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_FILTER)
                         .onFieldsWithData(
                                 CollectionUtil.map(entry("a", 1), entry("b", null), entry("c", 3)))
                         .andDataTypes(DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().nullable()))
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapFilter((k, v) -> v.isGreater(1)),
                                 "MAP_FILTER(f0, (k, v) -> v > 1)",
                                 CollectionUtil.map(entry("c", 3)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().nullable())));
@@ -408,23 +475,28 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()),
                                 DataTypes.INT())
                         // each key is replaced by the lambda body; values unchanged
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapTransformKeys((k, v) -> k.plus(10)),
                                 "MAP_TRANSFORM_KEYS(f0, (k, v) -> k + 10)",
                                 CollectionUtil.map(entry(11, "a"), entry(12, "b")),
                                 DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))
                         // the key transform closes over an outer column (f2 = 100)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapTransformKeys((k, v) -> k.plus($("f2"))),
                                 "MAP_TRANSFORM_KEYS(f0, (k, v) -> k + f2)",
                                 CollectionUtil.map(entry(101, "a"), entry(102, "b")),
                                 DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))
                         // NULL map -> NULL
-                        .testSqlResult(
+                        .testResult(
+                                $("f1").mapTransformKeys((k, v) -> k.plus(10)),
                                 "MAP_TRANSFORM_KEYS(f1, (k, v) -> k + 10)",
                                 null,
                                 DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))
                         // the key transform changes the key logical type (INT -> STRING); the
                         // output map key type must follow the lambda body type
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapTransformKeys(
+                                                (k, v) -> k.plus(10).cast(DataTypes.STRING())),
                                 "MAP_TRANSFORM_KEYS(f0, (k, v) -> CAST(k + 10 AS STRING))",
                                 CollectionUtil.map(entry("11", "a"), entry("12", "b")),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING())));
@@ -440,23 +512,27 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
                                 DataTypes.INT())
                         // each value is replaced by the lambda body; keys unchanged
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapTransformValues((k, v) -> v.times(10)),
                                 "MAP_TRANSFORM_VALUES(f0, (k, v) -> v * 10)",
                                 CollectionUtil.map(entry("a", 10), entry("b", 20)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // the value transform closes over an outer column (f2 = 100)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapTransformValues((k, v) -> v.plus($("f2"))),
                                 "MAP_TRANSFORM_VALUES(f0, (k, v) -> v + f2)",
                                 CollectionUtil.map(entry("a", 101), entry("b", 102)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // NULL map -> NULL
-                        .testSqlResult(
+                        .testResult(
+                                $("f1").mapTransformValues((k, v) -> v.times(10)),
                                 "MAP_TRANSFORM_VALUES(f1, (k, v) -> v * 10)",
                                 null,
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // the value transform changes the value logical type (INT -> DOUBLE); the
                         // output map value type must follow the lambda body type
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapTransformValues((k, v) -> v.cast(DataTypes.DOUBLE())),
                                 "MAP_TRANSFORM_VALUES(f0, (k, v) -> CAST(v AS DOUBLE))",
                                 CollectionUtil.map(entry("a", 1.0), entry("b", 2.0)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.DOUBLE())));
@@ -492,25 +568,32 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // merge over the union of keys; an absent key passes NULL for that side, so
                         // a key present in only one map yields a NULL value (v1 + v2 with a NULL
                         // operand is NULL)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith($("f1"), (k, v1, v2) -> v1.plus(v2)),
                                 "MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2)",
                                 CollectionUtil.map(
                                         entry("a", 11), entry("b", null), entry("c", null)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // the merge lambda closes over an outer column (f3 = 100)
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith(
+                                                $("f1"), (k, v1, v2) -> v1.plus(v2).plus($("f3"))),
                                 "MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2 + f3)",
                                 CollectionUtil.map(
                                         entry("a", 111), entry("b", null), entry("c", null)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // NULL map -> NULL
-                        .testSqlResult(
+                        .testResult(
+                                $("f2").mapZipWith($("f1"), (k, v1, v2) -> v1.plus(v2)),
                                 "MAP_ZIP_WITH(f2, f1, (k, v1, v2) -> v1 + v2)",
                                 null,
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // the merge changes the value logical type (INT -> BIGINT); the output map
                         // value type must follow the lambda body type
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith(
+                                                $("f1"),
+                                                (k, v1, v2) -> v1.cast(DataTypes.BIGINT())),
                                 "MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> CAST(v1 AS BIGINT))",
                                 CollectionUtil.map(
                                         entry("a", 1L), entry("b", 2L), entry("c", null)),
@@ -518,7 +601,8 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // fully disjoint key sets: the result is the union of both key sets and
                         // every entry sees a NULL on exactly one side, so each map contributes its
                         // own value untouched
-                        .testSqlResult(
+                        .testResult(
+                                $("f4").mapZipWith($("f5"), (k, v1, v2) -> v1.ifNull(v2)),
                                 "MAP_ZIP_WITH(f4, f5, (k, v1, v2) -> IFNULL(v1, v2))",
                                 CollectionUtil.map(
                                         entry("x", 1),
@@ -528,7 +612,8 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // identical key sets: no key is absent on either side, so no NULL is passed
                         // to the lambda and the result has exactly the shared keys
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith($("f6"), (k, v1, v2) -> v1.plus(v2)),
                                 "MAP_ZIP_WITH(f0, f6, (k, v1, v2) -> v1 + v2)",
                                 CollectionUtil.map(entry("a", 101), entry("b", 202)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
@@ -546,14 +631,23 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // compatible key types are generalized to their common type (like for
                         // MAP_UNION) and both maps are cast to it, so key 1 (INT) and key 1
                         // (BIGINT) are the same key of the merged map
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith(
+                                                $("f1"),
+                                                (k, v1, v2) ->
+                                                        v1.ifNull(lit(0L))
+                                                                .plus(v2.ifNull(lit(0L)))),
                                 "MAP_ZIP_WITH(f0, f1, (k, v1, v2) ->"
                                         + " IFNULL(v1, CAST(0 AS BIGINT)) + IFNULL(v2, CAST(0 AS BIGINT)))",
                                 CollectionUtil.map(entry(1L, 11L), entry(2L, 2L), entry(3L, 30L)),
                                 DataTypes.MAP(DataTypes.BIGINT(), DataTypes.BIGINT().notNull()))
                         // the same generalization for DECIMALs of different precision and scale:
                         // 1.20 and 1.200 become the same DECIMAL(6, 3) key
-                        .testSqlResult(
+                        .testResult(
+                                $("f2").mapZipWith(
+                                                $("f3"),
+                                                (k, v1, v2) ->
+                                                        v1.ifNull(lit(0)).plus(v2.ifNull(lit(0)))),
                                 "MAP_ZIP_WITH(f2, f3, (k, v1, v2) -> IFNULL(v1, 0) + IFNULL(v2, 0))",
                                 CollectionUtil.map(entry(new BigDecimal("1.200"), 3)),
                                 DataTypes.MAP(DataTypes.DECIMAL(6, 3), DataTypes.INT().notNull())),
@@ -570,19 +664,28 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // type of an empty map literal), so it is derived with a filter that keeps
                         // nothing
                         // both maps empty: the key union is empty, so the lambda is never applied
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapFilter((k, v) -> lit(false))
+                                        .mapZipWith(
+                                                $("f0").mapFilter((k, v) -> lit(false)),
+                                                (k, v1, v2) -> v1.plus(v2)),
                                 "MAP_ZIP_WITH(MAP_FILTER(f0, (k, v) -> FALSE), "
                                         + "MAP_FILTER(f0, (k, v) -> FALSE), (k, v1, v2) -> v1 + v2)",
                                 CollectionUtil.map(),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // only the first map is empty: the union is the second map's key set
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapFilter((k, v) -> lit(false))
+                                        .mapZipWith($("f0"), (k, v1, v2) -> v1.ifNull(v2)),
                                 "MAP_ZIP_WITH(MAP_FILTER(f0, (k, v) -> FALSE), f0, "
                                         + "(k, v1, v2) -> IFNULL(v1, v2))",
                                 CollectionUtil.map(entry("a", 1), entry("b", 2)),
                                 DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
                         // only the second map is empty: the union keeps the first map's key order
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith(
+                                                $("f0").mapFilter((k, v) -> lit(false)),
+                                                (k, v1, v2) -> v1.ifNull(v2)),
                                 "MAP_ZIP_WITH(f0, MAP_FILTER(f0, (k, v) -> FALSE), "
                                         + "(k, v1, v2) -> IFNULL(v1, v2))",
                                 CollectionUtil.map(entry("a", 1), entry("b", 2)),
@@ -590,7 +693,8 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // a NULL key is a key like any other: it merges across both maps and is
                         // indistinguishable in the lambda from an absent key, which also passes
                         // NULL for the value
-                        .testSqlResult(
+                        .testResult(
+                                $("f1").mapZipWith($("f2"), (k, v1, v2) -> v1.ifNull(v2)),
                                 "MAP_ZIP_WITH(f1, f2, (k, v1, v2) -> IFNULL(v1, v2))",
                                 CollectionUtil.map(
                                         entry((String) null, 1), entry("a", 2), entry("b", 20)),
@@ -622,11 +726,15 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.INT(), DataTypes.BYTES()))
                         // two value-equal BINARY keys (distinct byte[] instances) collide -> the
                         // transform produces a duplicate key and fails
+                        .testTableApiRuntimeError(
+                                $("f0").mapTransformKeys((k, v) -> v),
+                                "MAP_TRANSFORM_KEYS produced a duplicate key")
                         .testSqlRuntimeError(
                                 "MAP_TRANSFORM_KEYS(f0, (k, v) -> v)",
                                 "MAP_TRANSFORM_KEYS produced a duplicate key")
                         // control: value-distinct BINARY keys do NOT collide -> both survive
-                        .testSqlResult(
+                        .testResult(
+                                $("f1").mapTransformKeys((k, v) -> v).cardinality(),
                                 "CARDINALITY(MAP_TRANSFORM_KEYS(f1, (k, v) -> v))",
                                 2,
                                 DataTypes.INT()),
@@ -640,12 +748,16 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.BYTES(), DataTypes.INT()),
                                 DataTypes.MAP(DataTypes.BYTES(), DataTypes.INT()))
                         // value-equal BINARY keys in both maps merge into a single union entry
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith($("f1"), (k, v1, v2) -> v1.plus(v2))
+                                        .cardinality(),
                                 "CARDINALITY(MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2))",
                                 1,
                                 DataTypes.INT())
                         // control: value-distinct BINARY keys stay separate -> two union entries
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith($("f2"), (k, v1, v2) -> v1.plus(v2))
+                                        .cardinality(),
                                 "CARDINALITY(MAP_ZIP_WITH(f0, f2, (k, v1, v2) -> v1 + v2))",
                                 2,
                                 DataTypes.INT()),
@@ -654,6 +766,9 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         .andDataTypes(DataTypes.MAP(DataTypes.INT(), DataTypes.DOUBLE()))
                         // 0.0 and -0.0 are logically equal keys -> the transform produces a
                         // duplicate key even though their naive Double#hashCode differs
+                        .testTableApiRuntimeError(
+                                $("f0").mapTransformKeys((k, v) -> v),
+                                "MAP_TRANSFORM_KEYS produced a duplicate key")
                         .testSqlRuntimeError(
                                 "MAP_TRANSFORM_KEYS(f0, (k, v) -> v)",
                                 "MAP_TRANSFORM_KEYS produced a duplicate key"),
@@ -665,7 +780,9 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.DOUBLE(), DataTypes.INT()),
                                 DataTypes.MAP(DataTypes.DOUBLE(), DataTypes.INT()))
                         // signed-zero keys from separate maps merge into a single union entry
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith($("f1"), (k, v1, v2) -> v1.plus(v2))
+                                        .cardinality(),
                                 "CARDINALITY(MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2))",
                                 1,
                                 DataTypes.INT()),
@@ -678,7 +795,9 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.MAP(DataTypes.ARRAY(DataTypes.INT()), DataTypes.INT()))
                         // value-equal complex (ARRAY) keys merge into a single union entry, which
                         // exercises the generated key wrapper for a structured key type
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").mapZipWith($("f1"), (k, v1, v2) -> v1.plus(v2))
+                                        .cardinality(),
                                 "CARDINALITY(MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2))",
                                 1,
                                 DataTypes.INT()));
@@ -702,7 +821,12 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         // the inner ARRAY_ZIP_WITH body is the enclosing element x, unresolved
                         // until
                         // x is bound; each inner call returns a two-element array of x
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(
+                                                x ->
+                                                        array(1, 2)
+                                                                .arrayZipWith(
+                                                                        array(3, 4), (a, b) -> x)),
                                 "ARRAY_TRANSFORM(f0, x -> "
                                         + "ARRAY_ZIP_WITH(ARRAY[1, 2], ARRAY[3, 4], (a, b) -> x))",
                                 new Integer[][] {new Integer[] {5, 5}, new Integer[] {6, 6}},
@@ -715,7 +839,9 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
                         // the inner MAP_TRANSFORM_KEYS replaces each key with the enclosing element
                         // x
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(
+                                                x -> map(1, "a").mapTransformKeys((k, v) -> x)),
                                 "ARRAY_TRANSFORM(f0, x -> "
                                         + "MAP_TRANSFORM_KEYS(MAP[1, 'a'], (k, v) -> x))",
                                 new java.util.Map[] {
@@ -732,7 +858,9 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         .onFieldsWithData((Object) new Integer[] {5, 6})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
                         // the inner MAP_TRANSFORM_VALUES replaces each value with the enclosing x
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(
+                                                x -> map("a", 1).mapTransformValues((k, v) -> x)),
                                 "ARRAY_TRANSFORM(f0, x -> "
                                         + "MAP_TRANSFORM_VALUES(MAP['a', 1], (k, v) -> x))",
                                 new java.util.Map[] {
@@ -749,7 +877,13 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         .onFieldsWithData((Object) new Integer[] {5, 6})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
                         // the inner MAP_ZIP_WITH body is the enclosing element x for every key
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayTransform(
+                                                x ->
+                                                        map("a", 1)
+                                                                .mapZipWith(
+                                                                        map("b", 2),
+                                                                        (k, v1, v2) -> x)),
                                 "ARRAY_TRANSFORM(f0, x -> "
                                         + "MAP_ZIP_WITH(MAP['a', 1], MAP['b', 2], "
                                         + "(k, v1, v2) -> x))",

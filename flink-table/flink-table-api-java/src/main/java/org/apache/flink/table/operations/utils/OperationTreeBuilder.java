@@ -34,6 +34,7 @@ import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.ExpressionUtils;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.UnresolvedCallExpression;
+import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
 import org.apache.flink.table.expressions.resolver.ExpressionResolver;
 import org.apache.flink.table.expressions.resolver.LookupCallResolver;
 import org.apache.flink.table.expressions.resolver.SqlExpressionResolver;
@@ -946,12 +947,37 @@ public final class OperationTreeBuilder {
             this.exceptionMessage = exceptionMessage;
         }
 
+        /** Lambda parameters in scope at the node currently being visited. */
+        private final Set<String> lambdaParameters = new HashSet<>();
+
         @Override
         public Void visit(UnresolvedCallExpression call) {
             if (isFunctionOfKind(call, FunctionKind.AGGREGATE)) {
-                throw new ValidationException(exceptionMessage);
+                // An aggregate over a lambda parameter is not an aggregate of this projection; it
+                // is rejected during resolution, with a message that explains why it has no
+                // meaning at all.
+                if (!OperationExpressionsUtils.referencesLambdaParameter(call, lambdaParameters)) {
+                    throw new ValidationException(exceptionMessage);
+                }
+                return null;
             }
             call.getChildren().forEach(expr -> expr.accept(this));
+            return null;
+        }
+
+        @Override
+        public Void visitNonApiExpression(Expression other) {
+            if (other instanceof UnresolvedLambdaExpression) {
+                // A lambda body is hidden from getChildren(), but an aggregate over the enclosing
+                // query written there is still an aggregate of this projection.
+                final UnresolvedLambdaExpression lambda = (UnresolvedLambdaExpression) other;
+                final List<String> declared =
+                        lambda.getParameterNames().stream()
+                                .filter(lambdaParameters::add)
+                                .collect(Collectors.toList());
+                lambda.getBody().accept(this);
+                lambdaParameters.removeAll(declared);
+            }
             return null;
         }
 
