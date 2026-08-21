@@ -1512,7 +1512,8 @@ Data type of a lambda expression, described by the number of parameters it accep
 
 This type is the type of a lambda `x -> x + 1` passed to a
 [higher-order function]({{< ref "docs/sql/functions/built-in-functions" >}}#higher-order-functions).
-It is intended to be used in arguments of higher-order functions.
+It is intended to be used in arguments of higher-order functions, in particular to declare a lambda
+argument of a [user-defined function]({{< ref "docs/dev/table/functions/udfs" >}}#lambda-arguments).
 
 The parameter types and the result type are not part of the type. They are only needed for
 validation and type inference and are exposed there through `CallContext#getLambdaArgument(int)`,

@@ -55,6 +55,7 @@ import org.apache.flink.table.types.utils.DataTypeFactoryMock;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.bitmap.Bitmap;
 import org.apache.flink.types.variant.Variant;
+import org.apache.flink.util.function.Function2;
 
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -72,6 +73,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -756,6 +758,23 @@ class TypeInferenceExtractorTest {
                                         Row.class,
                                         false,
                                         EnumSet.of(StaticArgumentTrait.ROW_SEMANTIC_TABLE)))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.INT())),
+                // ---
+                // a lambda argument's arity is extracted, its parameter types are not
+                TestSpec.forProcessTableFunction(LambdaProcessTableFunction.class)
+                        .expectStaticArgument(
+                                StaticArgument.table(
+                                        "t",
+                                        Row.class,
+                                        false,
+                                        EnumSet.of(StaticArgumentTrait.ROW_SEMANTIC_TABLE)))
+                        .expectStaticArgument(
+                                StaticArgument.scalar(
+                                        "f",
+                                        DataTypes.FUNCTION(1).bridgedTo(Function.class),
+                                        false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar("g", DataTypes.FUNCTION(2), false))
                         .expectOutput(TypeStrategies.explicit(DataTypes.INT())),
                 // ---
                 TestSpec.forProcessTableFunction(TypedTableArgProcessTableFunction.class)
@@ -2566,6 +2585,13 @@ class TypeInferenceExtractorTest {
 
     private static class StatelessProcessTableFunction extends ProcessTableFunction<Integer> {
         public void eval(int i) {}
+    }
+
+    private static class LambdaProcessTableFunction extends ProcessTableFunction<Integer> {
+        public void eval(
+                @ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Row t,
+                Function<Integer, Integer> f,
+                Function2<Integer, Integer, Integer> g) {}
     }
 
     public static class MyState {

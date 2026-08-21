@@ -49,6 +49,13 @@ import java.util.stream.Stream;
  *
  * <p>Static arguments can take tables, models, or scalar values. Each argument takes a set of
  * {@link StaticArgumentTrait} that enable basic validation by the framework.
+ *
+ * <p>A lambda argument of a {@link org.apache.flink.table.functions.ProcessTableFunction} is
+ * declared as a scalar argument of type {@link org.apache.flink.table.api.DataTypes#FUNCTION(int)},
+ * which fixes its position, name, and number of parameters. Its parameter types are not part of a
+ * static signature, because they are derived per call; the function's input type strategy provides
+ * them by implementing {@link LambdaInputTypeStrategy}. Other function kinds declare lambda
+ * arguments with a {@link LambdaInputTypeStrategy} only.
  */
 @PublicEvolving
 public class StaticArgument {
@@ -89,10 +96,15 @@ public class StaticArgument {
         checkOptionalType();
         checkTableType();
         checkModelType();
+        checkLambdaType();
     }
 
     /**
      * Declares a scalar argument such as {@code f(12)} or {@code f(otherColumn)}.
+     *
+     * <p>A data type of {@link org.apache.flink.table.api.DataTypes#FUNCTION(int)} declares a
+     * lambda argument such as {@code f(myArg => x -> x + 1)} for a process table function (see the
+     * class documentation). A lambda argument must not be optional.
      *
      * @param name name for the assignment operator e.g. {@code f(myArg => 12)}
      * @param dataType explicit type to which the argument is cast if necessary
@@ -412,6 +424,30 @@ public class StaticArgument {
             return;
         }
         checkModelNotOptional();
+    }
+
+    private void checkLambdaType() {
+        if (dataType == null) {
+            return;
+        }
+        final LogicalType type = dataType.getLogicalType();
+        if (type.is(LogicalTypeRoot.FUNCTION)) {
+            // An omitted lambda would reach eval() as null, which no lambda object represents.
+            if (isOptional) {
+                throw new ValidationException(
+                        String.format("Lambda argument '%s' must not be optional.", name));
+            }
+            return;
+        }
+        if (LogicalTypeChecks.hasFunctionType(type)) {
+            throw new ValidationException(
+                    String.format(
+                            "Invalid data type '%s' for argument '%s'. The FUNCTION data type is "
+                                    + "a helper type for lambda arguments of higher-order "
+                                    + "functions. It cannot be materialized and must not be "
+                                    + "nested in another data type.",
+                            type, name));
+        }
     }
 
     private void checkTableNotOptional() {

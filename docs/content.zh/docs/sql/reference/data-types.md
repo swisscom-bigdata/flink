@@ -1503,7 +1503,8 @@ DataTypes.DESCRIPTOR()
 lambda 表达式的数据类型，由它所接受的参数个数来描述。
 
 该类型是传递给[高阶函数]({{< ref "docs/sql/functions/built-in-functions" >}}#高阶函数)的
-lambda（例如 `x -> x + 1`）的类型。它用于高阶函数的参数。
+lambda（例如 `x -> x + 1`）的类型。它用于高阶函数的参数，尤其是用于声明[自定义函数]({{< ref "docs/dev/table/functions/udfs" >}}#lambda-参数)的
+lambda 参数。
 
 参数类型和结果类型不属于该类型的一部分。它们仅在校验和类型推导时需要，并在此过程中通过
 `CallContext#getLambdaArgument(int)` 暴露，这与 `DESCRIPTOR` 将其所描述的列交由

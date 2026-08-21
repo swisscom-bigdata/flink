@@ -47,6 +47,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctio
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidPassThroughTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidRowKindFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidRowSemanticTableTimersFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.LambdaFoldFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.LateTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ListStateFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MapStateFunction;
@@ -943,6 +944,27 @@ public class ProcessTableFunctionTestPrograms {
                                             "+I[Alice, {+I[1], +I[0], +I[Alice, 400]}]")
                                     .build())
                     .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_LAMBDA_RESTORE =
+            TableTestProgram.of(
+                            "process-lambda-restore",
+                            "lambda argument folding into state for restore tests")
+                    .setupTemporarySystemFunction("f", LambdaFoldFunction.class)
+                    .setupTableSource(MULTI_VALUES_SOURCE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedBeforeRestore(
+                                            "+I[Bob, {null, 12}]", "+I[Alice, {null, 42}]")
+                                    .consumedAfterRestore(
+                                            "+I[Bob, {12, 111}]",
+                                            "+I[Bob, {111, 211}]",
+                                            "+I[Alice, {42, 442}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name, "
+                                    + "combine => (acc, x) -> acc + x)")
                     .build();
 
     public static final TableTestProgram PROCESS_CLEARING_STATE =
