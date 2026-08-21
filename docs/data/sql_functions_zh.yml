@@ -999,7 +999,6 @@ collection:
     table: MAP.at(ANY)
     description: 返回 map 中指定 key 对应的值。
   - sql: ARRAY_APPEND(array, element)
-    table: array.arrayAppend(element)
     description: Appends an element to the end of the array and returns the result. If the array itself is null, the function will return null. If an element to add is null, the null element will be added to the end of the array.
   - sql: ARRAY_CONTAINS(haystack, needle)
     table: haystack.arrayContains(needle)
@@ -1011,7 +1010,6 @@ collection:
     table: haystack.arrayPosition(needle)
     description: 返回数组中第一次出现 needle 元素的位置，返回类型为 int。如果数组中不存在该元素则返回 0。如果两个参数中任何一个参数为 null，则返回 null。序号不是从 0 开始，而是从 1 开始，第一个元素的序号为 1。
   - sql: ARRAY_PREPEND(array, element)
-    table: array.arrayPrepend(element)
     description: Appends an element to the beginning of the array and returns the result. If the array itself is null, the function will return null. If an element to add is null, the null element will be added to the beginning of the array.
   - sql: ARRAY_REMOVE(haystack, needle)
     table: haystack.arrayRemove(needle)
@@ -1020,7 +1018,6 @@ collection:
     table: haystack.arrayReverse()
     description: 翻转并返回数组 haystack。 如果数组是 null，则返回 null。
   - sql: ARRAY_SLICE(array, start_offset[, end_offset])
-    table: array.arraySlice(start_offset[, end_offset])
     description: 返回输入数组的子数组，位于“start_offset”和“end_offset”之间
       包含“start_offset”和“end_offset”）。偏移量从 1 开始，但 0 也被视为数组的开头。正值从数组开头开始计数，
       负值从数组末尾开始计数。如果省略“end_offset”，则该偏移量将被视为数组的长度。如果“start_offset”在
@@ -1038,10 +1035,8 @@ collection:
     table: array1.arrayIntersect(array2)
     description: Returns an ARRAY that contains the elements from array1 that are also in array2, without duplicates. If no elements that are both in array1 and array2, the function returns an empty ARRAY. If any of the array is null, the function will return null. The order of the elements from array1 is kept.
   - sql: ARRAY_MAX(array)
-    table: array.arrayMax()
     description: 返回数组中的最大值，如果数组是 null，则返回 null。
   - sql: ARRAY_JOIN(array, delimiter[, nullReplacement])
-    table: array.arrayJoin(delimiter[, nullReplacement])
     description: 返回一个字符串，表示给定数组中元素的串联，并且给定数组中元素的数据类型为字符串。 分隔符 delimiter 是一个字符串，用于分隔数组的每对连续元素。 可选的参数 nullReplacement 是一个字符串，用于替换数组中的 null 元素。 如果未指定 nullReplacement，则结果字符串中将从数组中省略 null 元素。 如果输入数组或分隔符或 nullReplacement 为 null，则返回 null。
   - sql: MAP_KEYS(map)
     table: MAP.mapKeys()
@@ -1061,6 +1056,38 @@ collection:
   - sql: SPLIT(string, delimiter)
     table: string.split(delimiter)
     description: Returns an array of substrings by splitting the input string based on the given delimiter. If the delimiter is not found in the string, the original string is returned as the only element in the array. If the delimiter is empty, every character in the string is split. If the string or delimiter is null, a null value is returned. If the delimiter is found at the beginning or end of the string, or there are contiguous delimiters, then an empty string is added to the array.
+
+higherorder:
+  - sql: ARRAY_TRANSFORM(array, element -> expression)
+    description: |
+      对 `array` 的每个元素应用 lambda 并返回结果数组，即 `(ARRAY<E>, E -> R)` 返回 `ARRAY<R>`。结果的元素类型 `R` 就是 lambda 函数体的类型；元素的顺序保持不变。
+
+      如果 `array` 为 `NULL`，则返回 `NULL`。空数组返回空数组。`NULL` 元素会和其它元素一样传给 lambda。
+
+      例如，`ARRAY_TRANSFORM(ARRAY[1, 2, 3], x -> x * 10)` 返回 `[10, 20, 30]`；`ARRAY_TRANSFORM(ARRAY[1, 2], x -> x + offset)` 会把列 `offset` 的值加到每个元素上。
+  - sql: ARRAY_FILTER(array, element -> predicate)
+    description: |
+      返回 `array` 中谓词 lambda 返回 `TRUE` 的元素，即 `(ARRAY<E>, E -> BOOLEAN)` 返回 `ARRAY<E>`。谓词为 `FALSE` 或 `NULL` 的元素会被排除；保留下来的元素顺序保持不变。lambda 的函数体必须返回 `BOOLEAN`，其它结果类型会导致校验错误。
+
+      如果 `array` 为 `NULL`，则返回 `NULL`。空数组返回空数组。
+
+      例如，`ARRAY_FILTER(ARRAY[1, 2, 3], x -> x > 1)` 返回 `[2, 3]`；`ARRAY_FILTER(ARRAY[1, NULL, 3], x -> x IS NOT NULL)` 返回 `[1, 3]`。
+  - sql: ARRAY_REDUCE(array, initial_value, (acc, element) -> expression)
+    description: |
+      对 `array` 做左折叠，即 `(ARRAY<E>, A, (A, E) -> A)` 返回 `A`。从 `initial_value` 开始，按顺序对每个元素应用合并 lambda，并返回最终的累加器。lambda 的第一个参数是累加器（其类型 `A` 取自 `initial_value`），第二个参数是元素；lambda 的结果会成为下一个元素的累加器。该调用的结果类型就是累加器类型 `A`。
+
+      lambda 的函数体必须可以赋值给 `A`：允许隐式放宽（例如 `INT` 到 `BIGINT`），但不兼容或者会收窄的结果类型会导致校验错误。如果 `array`、`initial_value` 或 lambda 的函数体可为 `NULL`，则结果可为 `NULL`。当 lambda 的函数体可能产生 `NULL` 时，累加器会被推导为可为 `NULL`，因此根据 `acc IS NULL` 分支的合并 lambda 会观察到前面某次迭代把累加器置为 `NULL` 的结果。
+
+      如果 `array` 为 `NULL`，则返回 `NULL`。对于空数组，返回初始累加器。`NULL` 元素会传给合并 lambda。
+
+      例如，`ARRAY_REDUCE(ARRAY[1, 2, 3], 0, (acc, x) -> acc + x)` 返回 `6`；`ARRAY_REDUCE(ARRAY['a', 'b', 'c'], '', (acc, x) -> acc || x)` 返回 `'abc'`。
+  - sql: ARRAY_ZIP_WITH(array1, array2, (element1, element2) -> expression)
+    description: |
+      按位置逐元素合并 `array1` 和 `array2`，即 `(ARRAY<E1>, ARRAY<E2>, (E1, E2) -> R)` 返回 `ARRAY<R>`。lambda 接收每个位置上的两个元素，其结果成为该位置上的元素。结果的元素类型 `R` 就是 lambda 函数体的类型。
+
+      较短的数组会用 `NULL` 补齐到较长数组的长度，因此结果的长度为 `max(cardinality(array1), cardinality(array2))`，补齐的位置会为对应的一侧传入 `NULL`。如果任意一个数组为 `NULL`，则返回 `NULL`。
+
+      例如，`ARRAY_ZIP_WITH(ARRAY[1, 2, 3], ARRAY[10, 20, 30], (x, y) -> x + y)` 返回 `[11, 22, 33]`；`ARRAY_ZIP_WITH(ARRAY[1, 2], ARRAY[3, 4, 5], (x, y) -> COALESCE(x, 0) + y)` 返回 `[4, 6, 5]`。
 
 json:
   - sql: IS JSON [ { VALUE | SCALAR | ARRAY | OBJECT } ]

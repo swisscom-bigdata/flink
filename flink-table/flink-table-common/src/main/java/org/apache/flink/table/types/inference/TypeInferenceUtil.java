@@ -30,6 +30,7 @@ import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.utils.CastCallContext;
 import org.apache.flink.table.types.inference.utils.UnknownCallContext;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
 
 import javax.annotation.Nullable;
 
@@ -72,6 +73,11 @@ import static org.apache.flink.table.types.logical.utils.LogicalTypeCasts.suppor
  */
 @Internal
 public final class TypeInferenceUtil {
+
+    private static final String FUNCTION_TYPE_NOT_MATERIALIZABLE_MESSAGE =
+            "The FUNCTION data type is a helper type for lambda arguments of higher-order "
+                    + "functions. It cannot be materialized and is not supported as a table "
+                    + "column, persisted return type, or state type.";
 
     /**
      * Runs the entire type inference process.
@@ -176,6 +182,13 @@ public final class TypeInferenceUtil {
         if (isUnknown(outputType)) {
             throw new ValidationException(
                     "Could not infer an output type for the given arguments. Untyped NULL received.");
+        }
+        if (LogicalTypeChecks.hasFunctionType(outputType.getLogicalType())) {
+            throw new ValidationException(
+                    String.format(
+                            "Invalid output data type '%s'. %s",
+                            outputType.getLogicalType().asSummaryString(),
+                            FUNCTION_TYPE_NOT_MATERIALIZABLE_MESSAGE));
         }
         return outputType;
     }
@@ -586,6 +599,25 @@ public final class TypeInferenceUtil {
             } else {
                 errorMessage =
                         String.format("Could not infer a data type for state entry '%s'.", name);
+            }
+            throw new ValidationException(errorMessage);
+        }
+
+        if (LogicalTypeChecks.hasFunctionType(stateType.getLogicalType())) {
+            final String errorMessage;
+            if (name.equals(UserDefinedFunctionHelper.DEFAULT_ACCUMULATOR_NAME)) {
+                errorMessage =
+                        String.format(
+                                "Invalid accumulator data type '%s'. %s",
+                                stateType.getLogicalType().asSummaryString(),
+                                FUNCTION_TYPE_NOT_MATERIALIZABLE_MESSAGE);
+            } else {
+                errorMessage =
+                        String.format(
+                                "Invalid data type '%s' for state entry '%s'. %s",
+                                stateType.getLogicalType().asSummaryString(),
+                                name,
+                                FUNCTION_TYPE_NOT_MATERIALIZABLE_MESSAGE);
             }
             throw new ValidationException(errorMessage);
         }

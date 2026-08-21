@@ -126,6 +126,12 @@ public final class InternalSerializers {
                 throw new ValidationException(
                         "The DESCRIPTOR data type is intended for parameters of PTFs. "
                                 + "Any other use is unsupported.");
+            case FUNCTION:
+                throw new ValidationException(
+                        "The FUNCTION data type is a helper type for lambda arguments of "
+                                + "higher-order functions. It cannot be materialized and is not "
+                                + "supported as a table column, persisted return type, or state "
+                                + "type.");
             case VARIANT:
                 return VariantSerializer.INSTANCE;
             case BITMAP:

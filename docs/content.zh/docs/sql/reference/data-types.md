@@ -192,6 +192,7 @@ The default planner supports the following set of SQL types:
 | `BYTES`          |                                                    |
 | `DECIMAL`        | Supports fixed precision and scale.                |
 | `DESCRIPTOR`     | Only supported for process table functions (PTFs). |
+| `FUNCTION`       | Only supported for lambda arguments of higher-order functions. |
 | `TINYINT`        |                                                    |
 | `SMALLINT`       |                                                    |
 | `INTEGER`        |                                                    |
@@ -1493,6 +1494,51 @@ DataTypes.DESCRIPTOR()
 | Java Type                            | Input | Output | Remarks    |
 |:-------------------------------------|:-----:|:------:|:-----------|
 | `org.apache.flink.types.ColumnList`  | X     | X      | *Default*  |
+
+{{< /tab >}}
+{{< /tabs >}}
+
+#### `FUNCTION`
+
+lambda 表达式的数据类型，由它所接受的参数个数来描述。
+
+该类型是传递给[高阶函数]({{< ref "docs/sql/functions/built-in-functions" >}}#高阶函数)的
+lambda（例如 `x -> x + 1`）的类型。它用于高阶函数的参数，尤其是用于声明[自定义函数]({{< ref "docs/dev/table/functions/udfs" >}}#lambda-参数)的
+lambda 参数。
+
+参数类型和结果类型不属于该类型的一部分。它们仅在校验和类型推导时需要，并在此过程中通过
+`CallContext#getLambdaArgument(int)` 暴露，这与 `DESCRIPTOR` 将其所描述的列交由
+`CallContext#getArgumentValue` 提供的方式相同。该类型本身只携带决定运行时表示的信息，即参数的个数。
+
+运行时不支持将该类型作为值。它是转换和优化期间的纯辅助类型。表的列不能声明为该类型，它不能用作状态类型，
+函数也不能声明该类型的返回类型。它没有在 Python 的 `DataTypes` 中暴露；在 PyFlink 中，lambda 是宿主语言的可调用对象。
+
+参数个数必须为一个、两个或三个，因为这是 lambda 在运行时可以被表示的形式（参见下面的桥接表）。
+`DataTypes.FUNCTION(int)` 会以校验错误拒绝其他任何个数。
+
+**声明**
+
+{{< tabs "0dc4bbd0-0e7b-4d4c-9c1e-2c4b3f6e9cdb" >}}
+{{< tab "SQL" >}}
+```text
+FUNCTION(2)
+```
+
+该类型无法在 SQL 中声明；此处展示的语法是它在执行计划和错误信息中的字符串表示形式。
+{{< /tab >}}
+{{< tab "Java/Scala" >}}
+```java
+// 接受一个参数的 lambda
+DataTypes.FUNCTION(1)
+```
+
+**桥接到 JVM 类型**
+
+| Java 类型                                       | 输入 | 输出 | 备注              |
+|:-----------------------------------------------|:----:|:----:|:-----------------|
+| `java.util.function.Function`                   |  X   |      | 一个参数时为*默认*  |
+| `java.util.function.BiFunction`                 |  X   |      | 两个参数时为*默认*  |
+| `org.apache.flink.util.function.TriFunction`    |  X   |      | 三个参数时为*默认*  |
 
 {{< /tab >}}
 {{< /tabs >}}

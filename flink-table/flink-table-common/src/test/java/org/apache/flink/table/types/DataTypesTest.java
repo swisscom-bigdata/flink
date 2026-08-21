@@ -21,6 +21,7 @@ package org.apache.flink.table.types;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.base.VoidSerializer;
 import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BinaryType;
@@ -32,6 +33,7 @@ import org.apache.flink.table.types.logical.DayTimeIntervalType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -56,9 +58,12 @@ import org.apache.flink.types.Row;
 import org.apache.flink.types.bitmap.Bitmap;
 import org.apache.flink.types.bitmap.RoaringBitmapData;
 import org.apache.flink.types.variant.Variant;
+import org.apache.flink.util.function.TriFunction;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
@@ -108,6 +113,7 @@ import static org.apache.flink.table.types.logical.DayTimeIntervalType.DEFAULT_D
 import static org.apache.flink.table.types.logical.DayTimeIntervalType.DayTimeResolution.MINUTE_TO_SECOND;
 import static org.apache.flink.table.types.utils.DataTypeFactoryMock.dummyRaw;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link DataTypes} and {@link LogicalTypeDataTypeConverter}. */
 class DataTypesTest {
@@ -362,6 +368,36 @@ class DataTypesTest {
             assertThat(testSpec.typeFactory.createDataType(testSpec.abstractDataType))
                     .isEqualTo(testSpec.expectedResolvedDataType);
         }
+    }
+
+    @Test
+    void testFunctionType() {
+        assertThat(DataTypes.FUNCTION(1))
+                .hasLogicalType(new FunctionType(1))
+                .hasConversionClass(java.util.function.Function.class);
+        assertThat(DataTypes.FUNCTION(2))
+                .hasLogicalType(new FunctionType(2))
+                .hasConversionClass(java.util.function.BiFunction.class);
+        assertThat(DataTypes.FUNCTION(3))
+                .hasLogicalType(new FunctionType(3))
+                .hasConversionClass(TriFunction.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 4, 42})
+    void testFunctionTypeWithUnsupportedParameterCount(int parameterCount) {
+        // an unsupported arity is reported as the arity error it is, not as a conversion-class
+        // error about a class the caller never named
+        assertThatThrownBy(() -> DataTypes.FUNCTION(parameterCount))
+                .isInstanceOf(ValidationException.class)
+                .hasMessage(
+                        "A lambda argument must have one, two, or three parameters, but a "
+                                + "FUNCTION type with %d parameters was requested. A lambda is "
+                                + "passed to a user-defined function as a "
+                                + "java.util.function.Function, java.util.function.BiFunction, or "
+                                + "org.apache.flink.util.function.TriFunction, so no other number "
+                                + "of parameters can be represented at runtime.",
+                        parameterCount);
     }
 
     // --------------------------------------------------------------------------------------------

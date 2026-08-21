@@ -106,6 +106,9 @@ object FlinkStreamRuleSets {
           // make sure window aggregate can be correctly rewritten by StreamLogicalWindowAggregateRule
           FlinkProjectMergeRule.INSTANCE,
           StreamLogicalWindowAggregateRule.INSTANCE,
+          // move an OVER window captured by a higher-order function's lambda into a
+          // projection below the call, before that projection is sliced below
+          ExtractLambdaOverWindowRule.INSTANCE,
           // slices a project into sections which contain window agg functions
           // and sections which do not.
           CoreRules.PROJECT_TO_LOGICAL_PROJECT_AND_WINDOW,

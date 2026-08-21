@@ -212,6 +212,22 @@ public final class SpecificInputTypeStrategies {
     /** Type strategy for {@link BuiltInFunctionDefinitions#REGEXP_REPLACE}. */
     public static final InputTypeStrategy REGEXP_REPLACE = new RegexpReplaceInputTypeStrategy();
 
+    /** Input strategy for {@link BuiltInFunctionDefinitions#ARRAY_TRANSFORM}. */
+    public static final InputTypeStrategy ARRAY_TRANSFORM_INPUT =
+            new ArrayHigherOrderFunctionInputTypeStrategy(2, 1);
+
+    /** Input strategy for {@link BuiltInFunctionDefinitions#ARRAY_FILTER}. */
+    public static final InputTypeStrategy ARRAY_FILTER_INPUT =
+            new ArrayHigherOrderFunctionInputTypeStrategy(2, 1, LogicalTypeRoot.BOOLEAN);
+
+    /** Input strategy for {@link BuiltInFunctionDefinitions#ARRAY_REDUCE}. */
+    public static final InputTypeStrategy ARRAY_REDUCE_INPUT =
+            new ArrayHigherOrderFunctionInputTypeStrategy(3, 2);
+
+    /** Input strategy for {@link BuiltInFunctionDefinitions#ARRAY_ZIP_WITH}. */
+    public static final InputTypeStrategy ARRAY_ZIP_WITH_INPUT =
+            new ArrayZipWithInputTypeStrategy();
+
     private SpecificInputTypeStrategies() {
         // no instantiation
     }

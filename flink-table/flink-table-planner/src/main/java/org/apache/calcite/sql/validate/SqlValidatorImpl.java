@@ -18,6 +18,7 @@ package org.apache.calcite.sql.validate;
 
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.planner.calcite.FlinkSqlCallBinding;
+import org.apache.flink.table.planner.calcite.FlinkSqlLambdaScope;
 import org.apache.flink.table.planner.functions.sql.ml.SqlVectorSearchTableFunction;
 
 import com.google.common.collect.ImmutableList;
@@ -219,6 +220,14 @@ import static org.apache.calcite.util.Util.first;
  * <p>Lines 8212-8229, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
  *
  * <p>Lines 8274-8282, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
+ *
+ * <p>FLINK-31207 (higher-order functions and lambdas): {@code registerFrom}, {@code case LAMBDA}
+ * creates a {@link org.apache.flink.table.planner.calcite.FlinkSqlLambdaScope} and registers the
+ * lambda call's operands under the lambda's own scope instead of the parent scope, so a nested
+ * lambda can close over the enclosing lambda's parameters. CALCITE-6242 (fixVersion 1.43.0) makes
+ * the same change upstream, so the block should be removed after upgrading Calcite to 1.43.0. It
+ * has to live here because {@code registerFrom} is private; every other part of Flink's lambda
+ * validation is an override in {@code FlinkCalciteSqlValidator}.
  */
 public class SqlValidatorImpl implements SqlValidatorWithHints {
     // ~ Static fields/initializers ---------------------------------------------
@@ -3043,14 +3052,28 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
 
             case LAMBDA:
                 call = (SqlCall) node;
-                SqlLambdaScope lambdaScope = new SqlLambdaScope(parentScope, (SqlLambda) call);
+                // ----- FLINK MODIFICATION BEGIN -----
+                // Use Flink's SqlLambdaScope subclass, whose lambda body may close over the
+                // columns of the enclosing query and the parameters of enclosing lambdas, and
+                // register the operands (in particular the body) under the lambda's own scope
+                // rather than the parent scope, so that a nested lambda in the body has this
+                // lambda's scope as its parent (see FlinkSqlLambdaScope). The scope creation and
+                // the operand registration both sit in this private method, so neither can be
+                // reached from a SqlValidatorImpl subclass.
+                //
+                // CALCITE-6242 (fixVersion 1.43.0) makes the same change upstream (registering
+                // only operand 1, the body); remove this block after upgrading to Calcite 1.43.0.
+                SqlLambdaScope lambdaScope = new FlinkSqlLambdaScope(parentScope, (SqlLambda) call);
+                // ----- FLINK MODIFICATION END -----
                 scopes.put(call, lambdaScope);
                 final LambdaNamespace lambdaNamespace =
                         new LambdaNamespace(this, (SqlLambda) call, node);
                 registerNamespace(usingScope, alias, lambdaNamespace, forceNullable);
                 operands = call.getOperandList();
                 for (int i = 0; i < operands.size(); i++) {
-                    registerOperandSubQueries(parentScope, call, i);
+                    // ----- FLINK MODIFICATION BEGIN -----
+                    registerOperandSubQueries(lambdaScope, call, i);
+                    // ----- FLINK MODIFICATION END -----
                 }
                 break;
 

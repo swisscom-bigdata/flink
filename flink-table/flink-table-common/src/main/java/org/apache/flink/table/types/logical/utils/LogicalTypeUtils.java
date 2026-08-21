@@ -20,13 +20,17 @@ package org.apache.flink.table.types.logical.utils;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.data.ArrayData;
+import org.apache.flink.table.data.BiFunctionData;
 import org.apache.flink.table.data.DecimalData;
+import org.apache.flink.table.data.FunctionData;
 import org.apache.flink.table.data.MapData;
 import org.apache.flink.table.data.RawValueData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.data.TriFunctionData;
 import org.apache.flink.table.types.logical.DistinctType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
@@ -115,6 +119,20 @@ public final class LogicalTypeUtils {
                 return Variant.class;
             case BITMAP:
                 return Bitmap.class;
+            case FUNCTION:
+                // A lambda argument is a handle on a compiled expression rather than a value, so
+                // there is nothing to convert. The representation still matters: the values the
+                // receiving function feeds the lambda are in its own representation, so an internal
+                // function hands the lambda internal data. An arity without a functional interface
+                // (a lambda carrying lifted captures) falls back to the one-parameter handle.
+                switch (((FunctionType) type).getParameterCount()) {
+                    case 2:
+                        return BiFunctionData.class;
+                    case 3:
+                        return TriFunctionData.class;
+                    default:
+                        return FunctionData.class;
+                }
             case SYMBOL:
             case UNRESOLVED:
             default:

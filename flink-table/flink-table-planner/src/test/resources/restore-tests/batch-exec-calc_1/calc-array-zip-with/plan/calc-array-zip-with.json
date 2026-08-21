@@ -1,0 +1,145 @@
+{
+  "flinkVersion" : "2.4",
+  "nodes" : [ {
+    "id" : 10,
+    "type" : "batch-exec-table-source-scan_1",
+    "scanTableSource" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`source_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "a",
+              "dataType" : "ARRAY<INT>"
+            }, {
+              "name" : "b",
+              "dataType" : "ARRAY<INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "outputType" : "ROW<`a` ARRAY<INT>, `b` ARRAY<INT>>",
+    "description" : "TableSourceScan(table=[[default_catalog, default_database, source_t]], fields=[a, b])",
+    "dynamicFilteringDataListenerID" : "1032abb5-d29e-4134-a066-5b75a67f18eb"
+  }, {
+    "id" : 11,
+    "type" : "batch-exec-calc_1",
+    "projection" : [ {
+      "kind" : "CALL",
+      "internalName" : "$ARRAY_ZIP_WITH$1",
+      "operands" : [ {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 0,
+        "type" : "ARRAY<INT>"
+      }, {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 1,
+        "type" : "ARRAY<INT>"
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "x",
+          "index" : 0,
+          "type" : "INT"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "y",
+          "index" : 1,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$+$1",
+          "operands" : [ {
+            "kind" : "CALL",
+            "internalName" : "$COALESCE$1",
+            "operands" : [ {
+              "kind" : "LAMBDA_REF",
+              "name" : "x",
+              "index" : 0,
+              "type" : "INT"
+            }, {
+              "kind" : "LITERAL",
+              "value" : 0,
+              "type" : "INT NOT NULL"
+            } ],
+            "type" : "INT NOT NULL"
+          }, {
+            "kind" : "CALL",
+            "internalName" : "$COALESCE$1",
+            "operands" : [ {
+              "kind" : "LAMBDA_REF",
+              "name" : "y",
+              "index" : 1,
+              "type" : "INT"
+            }, {
+              "kind" : "LITERAL",
+              "value" : 0,
+              "type" : "INT NOT NULL"
+            } ],
+            "type" : "INT NOT NULL"
+          } ],
+          "type" : "INT NOT NULL"
+        }
+      } ],
+      "type" : "ARRAY<INT NOT NULL>"
+    } ],
+    "condition" : null,
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` ARRAY<INT NOT NULL>>",
+    "description" : "Calc(select=[ARRAY_ZIP_WITH(a, b, (x, y) -> (COALESCE(x, 0) + COALESCE(y, 0))) AS EXPR$0])"
+  }, {
+    "id" : 12,
+    "type" : "batch-exec-sink_1",
+    "configuration" : {
+      "table.exec.sink.not-null-enforcer" : "ERROR",
+      "table.exec.sink.type-length-enforcer" : "IGNORE"
+    },
+    "dynamicTableSink" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`sink_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "a",
+              "dataType" : "ARRAY<INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "BLOCKING",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` ARRAY<INT NOT NULL>>",
+    "description" : "Sink(table=[default_catalog.default_database.sink_t], fields=[EXPR$0])"
+  } ],
+  "edges" : [ {
+    "source" : 10,
+    "target" : 11,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  }, {
+    "source" : 11,
+    "target" : 12,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  } ]
+}

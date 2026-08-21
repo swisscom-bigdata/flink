@@ -39,6 +39,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DescriptorType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LegacyTypeInformationType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
@@ -310,6 +311,14 @@ public class LogicalTypeParserTest {
                 TestSpec.forString("BITMAP").expectType(new BitmapType()),
                 TestSpec.forString("BITMAP NOT NULL").expectType(new BitmapType(false)),
 
+                // FUNCTION (lambda) types round-trip through the parser; the type only carries
+                // the parameter count and the wrapper nullability is canonical (nullable)
+                TestSpec.forString("FUNCTION(0)").expectType(FunctionType.ofUncheckedArity(0)),
+                TestSpec.forString("FUNCTION(1)").expectType(new FunctionType(1)),
+                TestSpec.forString("FUNCTION(3)").expectType(new FunctionType(3)),
+                // the wrapper nullability is canonicalized away
+                TestSpec.forString("FUNCTION(1) NOT NULL").expectType(new FunctionType(1)),
+
                 // error message testing
 
                 TestSpec.forString("ROW<`f0").expectErrorMessage("Unexpected end"),
@@ -320,7 +329,13 @@ public class LogicalTypeParserTest {
                 TestSpec.forString("ROW<field INT, field2>")
                         .expectErrorMessage("<KEYWORD> expected"),
                 TestSpec.forString("RAW('unknown.class', '')")
-                        .expectErrorMessage("Unable to restore the RAW type"));
+                        .expectErrorMessage("Unable to restore the RAW type"),
+                TestSpec.forString("FUNCTION(INT)").expectErrorMessage("<LITERAL_INT> expected"),
+                TestSpec.forString("FUNCTION(1").expectErrorMessage("Unexpected end"),
+                // the parameter count is required; a bare FUNCTION names no particular type
+                TestSpec.forString("FUNCTION").expectErrorMessage("Unexpected end"),
+                TestSpec.forString("FUNCTION NOT NULL")
+                        .expectErrorMessage("<BEGIN_PARAMETER> expected"));
     }
 
     @ParameterizedTest(name = "{index}: {0}")

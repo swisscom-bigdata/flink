@@ -40,6 +40,7 @@ import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.TimestampKind;
 import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
 
 import javax.annotation.Nullable;
 
@@ -135,7 +136,29 @@ class DefaultSchemaResolver implements SchemaResolver {
             }
         }
 
+        Stream.of(resolvedColumns).forEach(DefaultSchemaResolver::validateColumnDataType);
+
         return Arrays.asList(resolvedColumns);
+    }
+
+    /**
+     * Rejects a column whose data type contains a {@code FUNCTION} type. Such a type describes a
+     * lambda argument of a higher-order function; it is a planning helper that is never
+     * materialized, so it cannot be the type of a column. Without this check a {@code FUNCTION}
+     * column would be accepted by the schema APIs and persisted in a catalog, only to fail much
+     * later when the table is actually read or written.
+     */
+    private static void validateColumnDataType(Column column) {
+        final LogicalType type = column.getDataType().getLogicalType();
+        if (LogicalTypeChecks.hasFunctionType(type)) {
+            throw new ValidationException(
+                    String.format(
+                            "Invalid data type '%s' for column '%s'. The FUNCTION data type is a "
+                                    + "helper type for lambda arguments of higher-order functions. "
+                                    + "It cannot be materialized and is not supported as a table "
+                                    + "column, persisted return type, or state type.",
+                            type.asSummaryString(), column.getName()));
+        }
     }
 
     private PhysicalColumn resolvePhysicalColumn(UnresolvedPhysicalColumn unresolvedColumn) {

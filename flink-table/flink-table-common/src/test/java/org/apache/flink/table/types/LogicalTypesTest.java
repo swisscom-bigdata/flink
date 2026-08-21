@@ -26,6 +26,9 @@ import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
+import org.apache.flink.table.data.BiFunctionData;
+import org.apache.flink.table.data.FunctionData;
+import org.apache.flink.table.data.TriFunctionData;
 import org.apache.flink.table.expressions.TimeIntervalUnit;
 import org.apache.flink.table.legacy.types.logical.TypeInformationRawType;
 import org.apache.flink.table.types.logical.ArrayType;
@@ -40,6 +43,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DistinctType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -62,14 +66,18 @@ import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.logical.VariantType;
 import org.apache.flink.table.types.logical.YearMonthIntervalType;
 import org.apache.flink.table.types.logical.ZonedTimestampType;
+import org.apache.flink.table.types.logical.utils.LogicalTypeUtils;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.bitmap.Bitmap;
 import org.apache.flink.types.bitmap.RoaringBitmapData;
 import org.apache.flink.types.variant.BinaryVariant;
 import org.apache.flink.types.variant.Variant;
+import org.apache.flink.util.function.TriFunction;
 
 import org.assertj.core.api.ThrowingConsumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -80,6 +88,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Stream;
 
 import static org.apache.flink.table.test.TableAssertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -627,6 +636,117 @@ public class LogicalTypesTest {
                                 new Class[] {Bitmap.class, RoaringBitmapData.class},
                                 new LogicalType[] {},
                                 new BitmapType(false)));
+    }
+
+    @Test
+    void testFunctionType() {
+        final FunctionType functionType = new FunctionType(1);
+
+        assertThat(functionType)
+                .isJavaSerializable()
+                .isNullable()
+                .isEqualTo(functionType)
+                .isEqualTo(functionType.copy())
+                .isNotEqualTo(new FunctionType(2))
+                .hasSerializableString("FUNCTION(1)")
+                .hasSummaryString("FUNCTION(1)")
+                .supportsInputConversion(java.util.function.Function.class)
+                .supportsOutputConversion(java.util.function.Function.class)
+                .hasExactlyChildren();
+
+        // the wrapper nullability is canonical: copy(false) does not create a NOT NULL variant
+        assertThat(functionType.copy(false)).isNullable().isEqualTo(functionType);
+
+        // the serializable string round-trips through the parser
+        assertThat(
+                        org.apache.flink.table.types.logical.utils.LogicalTypeParser.parse(
+                                functionType.asSerializableString(),
+                                Thread.currentThread().getContextClassLoader()))
+                .isEqualTo(functionType);
+    }
+
+    @Test
+    void testFunctionTypeConversionClassPerArity() {
+        // a two-parameter lambda is exposed as a BiFunction, a three-parameter one as a TriFunction
+        assertThat(new FunctionType(2))
+                .hasSummaryString("FUNCTION(2)")
+                .supportsInputConversion(java.util.function.BiFunction.class)
+                .supportsOutputConversion(java.util.function.BiFunction.class)
+                .doesNotSupportInputConversion(java.util.function.Function.class);
+        assertThat(new FunctionType(3))
+                .hasSummaryString("FUNCTION(3)")
+                .supportsInputConversion(TriFunction.class)
+                .supportsOutputConversion(TriFunction.class)
+                .doesNotSupportInputConversion(java.util.function.BiFunction.class);
+    }
+
+    @Test
+    void testFunctionTypeWithoutConversionClass() {
+        // arities outside of one to three have no functional interface; the type can still be
+        // constructed internally and rendered (a lambda carrying lifted captures exceeds three
+        // parameters), but its value cannot be handed to a user-defined function
+        Stream.of(FunctionType.ofUncheckedArity(0), FunctionType.ofUncheckedArity(4))
+                .forEach(
+                        functionType ->
+                                assertThat(functionType)
+                                        .doesNotSupportInputConversion(
+                                                java.util.function.Function.class)
+                                        .doesNotSupportOutputConversion(
+                                                java.util.function.Function.class)
+                                        .doesNotSupportInputConversion(Object.class));
+        assertThat(FunctionType.ofUncheckedArity(0).asSummaryString()).isEqualTo("FUNCTION(0)");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 4, 42})
+    void testFunctionTypeRejectsUnconvertibleArity(int parameterCount) {
+        // the public constructor is a public API path just like DataTypes.FUNCTION(int), so it
+        // must not admit an arity that has no runtime representation
+        assertThatThrownBy(() -> new FunctionType(parameterCount))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        String.format(
+                                "A lambda argument must have one, two, or three parameters, but a "
+                                        + "FUNCTION type with %d parameters was requested.",
+                                parameterCount));
+    }
+
+    @Test
+    void testFunctionTypeInternalConversionClass() {
+        // the arity determines the internal representation the receiving function gets its lambda
+        // as; an arity without a functional interface falls back to the one-parameter handle
+        assertThat(LogicalTypeUtils.toInternalConversionClass(new FunctionType(1)))
+                .isEqualTo(FunctionData.class);
+        assertThat(LogicalTypeUtils.toInternalConversionClass(new FunctionType(2)))
+                .isEqualTo(BiFunctionData.class);
+        assertThat(LogicalTypeUtils.toInternalConversionClass(new FunctionType(3)))
+                .isEqualTo(TriFunctionData.class);
+        assertThat(LogicalTypeUtils.toInternalConversionClass(FunctionType.ofUncheckedArity(0)))
+                .isEqualTo(FunctionData.class);
+        // the lifted-capture path: more parameters than the user-visible arity
+        assertThat(LogicalTypeUtils.toInternalConversionClass(FunctionType.ofUncheckedArity(4)))
+                .isEqualTo(FunctionData.class);
+    }
+
+    @Test
+    void testFunctionTypeWithUncheckedArity() {
+        // a lambda that carries lifted captures exceeds the user-visible arity and must still
+        // round-trip through asSerializableString(), so the internal factory admits it
+        final FunctionType lifted = FunctionType.ofUncheckedArity(4);
+
+        assertThat(lifted.getParameterCount()).isEqualTo(4);
+        assertThat(lifted.asSerializableString()).isEqualTo("FUNCTION(4)");
+        assertThat(
+                        org.apache.flink.table.types.logical.utils.LogicalTypeParser.parse(
+                                lifted.asSerializableString(),
+                                Thread.currentThread().getContextClassLoader()))
+                .isEqualTo(lifted);
+        assertThat(lifted.copy(false)).isEqualTo(lifted);
+
+        // "unchecked" bounds the convertibility check only; a negative arity is nonsense anywhere
+        assertThatThrownBy(() -> FunctionType.ofUncheckedArity(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Parameter count must not be negative.");
     }
 
     @Test

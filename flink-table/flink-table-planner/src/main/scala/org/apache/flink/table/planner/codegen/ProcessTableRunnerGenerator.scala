@@ -92,7 +92,7 @@ object ProcessTableRunnerGenerator {
       callContext,
       classOf[PlannerBase].getClassLoader,
       ctx.tableConfig,
-      new DefaultExpressionEvaluatorFactory(ctx.tableConfig, ctx.classLoader, rexFactory)
+      new DefaultExpressionEvaluatorFactory(ctx.tableConfig, ctx.classLoader, rexFactory, ctx)
     )
     val functionTerm = ctx.addReusableFunction(udf)
     val inference = udf.getTypeInference(dataTypeFactory)

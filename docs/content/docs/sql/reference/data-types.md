@@ -200,6 +200,7 @@ The default planner supports the following set of SQL types:
 | `BYTES`          |                                                    |
 | `DECIMAL`        | Supports fixed precision and scale.                |
 | `DESCRIPTOR`     | Only supported for process table functions (PTFs). |
+| `FUNCTION`       | Only supported for lambda arguments of higher-order functions. |
 | `TINYINT`        |                                                    |
 | `SMALLINT`       |                                                    |
 | `INTEGER`        |                                                    |
@@ -1501,6 +1502,58 @@ DataTypes.DESCRIPTOR()
 | Java Type                            | Input | Output | Remarks    |
 |:-------------------------------------|:-----:|:------:|:-----------|
 | `org.apache.flink.types.ColumnList`  | X     | X      | *Default*  |
+
+{{< /tab >}}
+{{< /tabs >}}
+
+#### `FUNCTION`
+
+Data type of a lambda expression, described by the number of parameters it accepts.
+
+This type is the type of a lambda `x -> x + 1` passed to a
+[higher-order function]({{< ref "docs/sql/functions/built-in-functions" >}}#higher-order-functions).
+It is intended to be used in arguments of higher-order functions, in particular to declare a lambda
+argument of a [user-defined function]({{< ref "docs/dev/table/functions/udfs" >}}#lambda-arguments).
+
+The parameter types and the result type are not part of the type. They are only needed for
+validation and type inference and are exposed there through `CallContext#getLambdaArgument(int)`,
+in the same way that `DESCRIPTOR` leaves the described columns to `CallContext#getArgumentValue`.
+The type itself carries only what determines the runtime representation, i.e. the number of
+parameters.
+
+The runtime does not support this type as a value. It is a pure helper type during translation and
+planning. Table columns cannot be declared with this type, it cannot be used as a state type, and
+functions cannot declare return types of this type. It is not exposed in the Python `DataTypes`; in
+PyFlink a lambda is a host-language callable.
+
+The number of parameters must be one, two, or three, because that is what a lambda can be
+represented as at runtime (see the bridging table below). `DataTypes.FUNCTION(int)` rejects any
+other number with a validation error.
+
+**Declaration**
+
+{{< tabs "0dc4bbd0-0e7b-4d4c-9c1e-2c4b3f6e9cdb" >}}
+{{< tab "SQL" >}}
+```text
+FUNCTION(2)
+```
+
+The type cannot be declared in SQL; the shown syntax is the string rendering used in plans and error
+messages.
+{{< /tab >}}
+{{< tab "Java/Scala" >}}
+```java
+// a lambda taking one parameter
+DataTypes.FUNCTION(1)
+```
+
+**Bridging to JVM Types**
+
+| Java Type                                      | Input | Output | Remarks                       |
+|:-----------------------------------------------|:-----:|:------:|:------------------------------|
+| `java.util.function.Function`                   | X     |        | *Default* for one parameter   |
+| `java.util.function.BiFunction`                 | X     |        | *Default* for two parameters  |
+| `org.apache.flink.util.function.TriFunction`    | X     |        | *Default* for three parameters|
 
 {{< /tab >}}
 {{< /tabs >}}

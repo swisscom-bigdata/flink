@@ -31,6 +31,7 @@ import org.apache.flink.table.types.logical.DateType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -295,7 +296,48 @@ class LogicalTypeCastsTest {
                         new VariantType(),
                         new MapType(new IntType(), new CharType()),
                         false,
-                        false));
+                        false),
+
+                // a lambda is never materialized as a runtime value, so a FUNCTION type is only
+                // cast-compatible with itself; note that parameter and result types are not part
+                // of the type (they are exposed via CallContext#getLambdaArgument), so the arity
+                // is all that has to match
+                Arguments.of(new FunctionType(1), new FunctionType(1), true, true),
+                Arguments.of(new FunctionType(3), new FunctionType(3), true, true),
+                // arity mismatch
+                Arguments.of(new FunctionType(1), new FunctionType(2), false, false),
+                Arguments.of(new FunctionType(2), new FunctionType(1), false, false),
+                Arguments.of(new FunctionType(1), new FunctionType(3), false, false),
+                // no cast between a FUNCTION and any other type
+                Arguments.of(new FunctionType(1), new IntType(), false, false),
+                Arguments.of(new IntType(), new FunctionType(1), false, false),
+                Arguments.of(new FunctionType(1), VarCharType.STRING_TYPE, false, false),
+                Arguments.of(VarCharType.STRING_TYPE, new FunctionType(1), false, false),
+                Arguments.of(new FunctionType(1), new ArrayType(new IntType()), false, false),
+                // nested in a constructed type
+                Arguments.of(
+                        new ArrayType(new FunctionType(1)),
+                        new ArrayType(new FunctionType(2)),
+                        false,
+                        false),
+                Arguments.of(
+                        new ArrayType(new FunctionType(1)),
+                        new ArrayType(new IntType()),
+                        false,
+                        false),
+                Arguments.of(
+                        new FunctionType(1),
+                        new RowType(List.of(new RowField("f", new IntType()))),
+                        false,
+                        false),
+                Arguments.of(
+                        new FunctionType(1),
+                        new RawType<>(Integer.class, IntSerializer.INSTANCE),
+                        false,
+                        false),
+                // a lambda can never be NULL
+                Arguments.of(new NullType(), new FunctionType(1), false, false),
+                Arguments.of(new FunctionType(1), new NullType(), false, false));
     }
 
     @ParameterizedTest(name = "{index}: [From: {0}, To: {1}, Implicit: {2}, Explicit: {3}]")

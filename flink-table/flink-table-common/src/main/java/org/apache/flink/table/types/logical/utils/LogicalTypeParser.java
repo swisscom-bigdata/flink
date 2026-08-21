@@ -36,6 +36,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DescriptorType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LegacyTypeInformationType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
@@ -336,7 +337,8 @@ public final class LogicalTypeParser {
         DESCRIPTOR,
         STRUCTURED,
         VARIANT,
-        BITMAP
+        BITMAP,
+        FUNCTION
     }
 
     private static final Set<String> KEYWORDS =
@@ -586,6 +588,8 @@ public final class LogicalTypeParser {
                     return new VariantType();
                 case BITMAP:
                     return new BitmapType();
+                case FUNCTION:
+                    return parseFunctionType();
                 default:
                     throw parsingError("Unsupported type: " + token().value);
             }
@@ -851,6 +855,14 @@ public final class LogicalTypeParser {
             return precision;
         }
 
+        private int parseRequiredPrecision() {
+            nextToken(TokenType.BEGIN_PARAMETER);
+            nextToken(TokenType.LITERAL_INT);
+            final int precision = tokenAsInt();
+            nextToken(TokenType.END_PARAMETER);
+            return precision;
+        }
+
         private LogicalType parseArrayType() {
             nextToken(TokenType.BEGIN_SUBTYPE);
             final LogicalType elementType = parseTypeWithNullability();
@@ -872,6 +884,17 @@ public final class LogicalTypeParser {
             final LogicalType valueType = parseTypeWithNullability();
             nextToken(TokenType.END_SUBTYPE);
             return new MapType(keyType, valueType);
+        }
+
+        private LogicalType parseFunctionType() {
+            // The parameter count is the only part of the type; the parameter and result types are
+            // carried by the call context (see FunctionType). It is required rather than defaulted
+            // because a bare FUNCTION names no particular type, and asSerializableString() always
+            // writes the count, so no serialized form depends on a default.
+            // The arity is unchecked: a lambda that carries lifted captures exceeds the
+            // user-visible arity, and asSerializableString() must parse back for every logical
+            // type.
+            return FunctionType.ofUncheckedArity(parseRequiredPrecision());
         }
 
         private LogicalType parseRowType() {

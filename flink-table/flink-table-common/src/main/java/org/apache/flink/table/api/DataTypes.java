@@ -44,6 +44,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DescriptorType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -840,6 +841,30 @@ public final class DataTypes {
      */
     public static DataType DESCRIPTOR() {
         return new AtomicDataType(new DescriptorType());
+    }
+
+    /**
+     * Data type of a function (i.e. a lambda expression) accepting the given number of parameters.
+     *
+     * <p>This type is intended to be used for higher-order function arguments such as the lambda
+     * passed to {@code ARRAY_TRANSFORM(array, x -> x + 1)}. The parameter types and the result type
+     * are not part of the type; they are exposed to type inference through {@link
+     * org.apache.flink.table.types.inference.CallContext#getLambdaArgument(int)}.
+     *
+     * <p>The parameter count must be one, two, or three, because that is what a lambda can be
+     * represented as at runtime ({@link java.util.function.Function}, {@link
+     * java.util.function.BiFunction}, or {@link org.apache.flink.util.function.TriFunction}, see
+     * {@link FunctionType#MAX_CONVERTIBLE_PARAMETER_COUNT}). Any other count is rejected with a
+     * {@link ValidationException}.
+     *
+     * <p>Note: The runtime does not materialize a value of this type. It is a helper type during
+     * translation, planning, and plan (de)serialization. Table columns cannot be declared with this
+     * type, and it cannot be used as a persisted return type or a state type.
+     *
+     * @see FunctionType
+     */
+    public static DataType FUNCTION(int parameterCount) {
+        return new AtomicDataType(new FunctionType(parameterCount));
     }
 
     /**

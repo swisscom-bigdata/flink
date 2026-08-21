@@ -69,6 +69,56 @@ The scalar functions take zero, one or more values as the input and return a sin
 
 {{< sql_functions "collection" >}}
 
+### Higher-Order Functions
+
+Higher-order functions take a *lambda expression* as an argument and apply it to the elements or
+entries of an `ARRAY` or `MAP`.
+
+A lambda is an anonymous function written `parameter -> body` (or `(parameter1, parameter2) -> body`
+for more than one parameter). Its parameter types are derived from the collection the function is
+applied to, so they are never declared:
+
+```sql
+SELECT ARRAY_TRANSFORM(vals, x -> x * 10) FROM t;   -- x is bound to the element type of vals
+```
+
+The parameters of one lambda must have unique names. A nested lambda may reuse the name of an
+enclosing lambda's parameter, which then shadows it.
+
+A lambda body is an ordinary expression: besides its own parameters it may reference (*capture*) any
+column of the enclosing query, and it may call built-in or user-defined functions, including other
+higher-order functions. Nested lambdas can capture the parameters of the enclosing lambdas:
+
+```sql
+-- capture the column `base`
+SELECT ARRAY_TRANSFORM(vals, x -> x + base) FROM t;
+
+-- nested: the inner lambda captures `a`, the parameter of the outer lambda
+SELECT ARRAY_TRANSFORM(nested_vals, a -> ARRAY_FILTER(a, x -> x > a[1])) FROM t;
+```
+
+A body may capture any value the enclosing query produces for the current row, including an
+aggregate, an `OVER` window or a sub-query — each is evaluated once per row or group, and the body
+sees its result:
+
+```sql
+SELECT ARRAY_TRANSFORM(vals, x -> x + SUM(base)) FROM t GROUP BY vals;
+SELECT ARRAY_TRANSFORM(vals, x -> x + SUM(base) OVER ()) FROM t;
+SELECT ARRAY_TRANSFORM(vals, x -> x + (SELECT MAX(base) FROM t)) FROM t;
+```
+
+Those constructs may not be evaluated over a lambda *parameter*, however: a parameter is a single
+element, not a set of rows, so `ARRAY_TRANSFORM(vals, x -> SUM(x))` is a validation error. Use
+`ARRAY_REDUCE` to fold an array's own elements. A table function cannot appear in a body either,
+since it produces rows rather than a value, nor can an asynchronous scalar function, whose result
+only arrives after the body has been evaluated.
+
+Lambdas are only valid as arguments of higher-order functions; using one anywhere else is a
+validation error. They are not values: a lambda cannot be stored in a column, assigned to a
+variable, or returned from a query.
+
+{{< sql_functions "higherorder" >}}
+
 ### JSON Functions
 
 JSON functions make use of JSON path expressions as described in ISO/IEC TR 19075-6 of the SQL

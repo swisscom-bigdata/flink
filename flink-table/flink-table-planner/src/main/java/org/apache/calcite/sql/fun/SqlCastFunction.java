@@ -18,6 +18,7 @@ package org.apache.calcite.sql.fun;
 
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
+import org.apache.flink.table.planner.functions.utils.SqlValidatorUtils;
 import org.apache.flink.table.planner.plan.schema.BitmapRelDataType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeCasts;
 
@@ -269,6 +270,24 @@ public class SqlCastFunction extends SqlFunction {
 
     private boolean canCastFrom(RelDataType toType, RelDataType fromType) {
         SqlTypeName fromTypeName = fromType.getSqlTypeName();
+
+        // ----- FLINK MODIFICATION BEGIN -----
+        // A lambda parameter type is a placeholder until the enclosing higher-order call binds it
+        // from its sibling arguments, so a cast whose source type still contains an unresolved
+        // lambda parameter cannot be decided here. Accept it and let the later validation pass --
+        // which runs once the parameter is bound -- make the decision, instead of rejecting a cast
+        // that is legal for the type the parameter will actually have (FLINK-31207 higher-order
+        // functions and lambdas).
+        //
+        // Not covered by CALCITE-6242 or CALCITE-7497: upstream has no notion of a deferred lambda
+        // parameter type, so this block survives the Calcite 1.42.0 and 1.43.0 upgrades.
+        // canCastFrom
+        // is private and SqlCastFunction is instantiated from SqlStdOperatorTable, so the check has
+        // no reachable extension point.
+        if (SqlValidatorUtils.containsUnresolvedLambdaParameter(fromType)) {
+            return true;
+        }
+        // ----- FLINK MODIFICATION END -----
 
         // Cast to Variant is not support at the moment.
         // TODO: Support cast to variant (FLINK-37925，FLINK-37926)

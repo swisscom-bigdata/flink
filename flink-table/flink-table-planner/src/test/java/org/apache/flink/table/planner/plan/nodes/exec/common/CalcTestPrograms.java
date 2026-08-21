@@ -62,6 +62,126 @@ public class CalcTestPrograms {
                     .runSql("INSERT INTO sink_t SELECT a + 1, b FROM t")
                     .build();
 
+    // The higher-order programs below pin one compatibility surface: the serialized lambda
+    // representation ("kind": "LAMBDA" / "LAMBDA_REF" and the lifted capture indices), which is
+    // written identically for every built-in that takes a lambda and for user-defined ones. They
+    // are per function only because they were written one per function; the coverage they provide
+    // is not. A new higher-order built-in therefore needs no program here -- it needs semantic and
+    // validation cases, which HigherOrderFunctionCoverageTest requires. Add a program here only
+    // when the persisted representation itself changes, for instance a new lambda shape that
+    // serializes differently.
+    public static final TableTestProgram CALC_ARRAY_TRANSFORM =
+            TableTestProgram.of(
+                            "calc-array-transform",
+                            "validates calc node with the ARRAY_TRANSFORM higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .producedBeforeRestore(Row.of((Object) new Integer[] {1, 2, 3}))
+                                    .producedAfterRestore(Row.of((Object) new Integer[] {4, 5}))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .consumedBeforeRestore(
+                                            Row.of((Object) new Integer[] {10, 20, 30}))
+                                    .consumedAfterRestore(Row.of((Object) new Integer[] {40, 50}))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT ARRAY_TRANSFORM(a, x -> x * 10) FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_ARRAY_FILTER =
+            TableTestProgram.of(
+                            "calc-array-filter",
+                            "validates calc node with the ARRAY_FILTER higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .producedBeforeRestore(
+                                            Row.of((Object) new Integer[] {1, 2, 3, 4}))
+                                    .producedAfterRestore(Row.of((Object) new Integer[] {5, 1}))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .consumedBeforeRestore(Row.of((Object) new Integer[] {3, 4}))
+                                    .consumedAfterRestore(Row.of((Object) new Integer[] {5}))
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT ARRAY_FILTER(a, x -> x > 2) FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_ARRAY_REDUCE =
+            TableTestProgram.of(
+                            "calc-array-reduce",
+                            "validates calc node with the ARRAY_REDUCE higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .producedBeforeRestore(Row.of((Object) new Integer[] {1, 2, 3}))
+                                    .producedAfterRestore(Row.of((Object) new Integer[] {4, 5}))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a INT")
+                                    .consumedBeforeRestore(Row.of(6))
+                                    .consumedAfterRestore(Row.of(9))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t "
+                                    + "SELECT ARRAY_REDUCE(a, 0, (acc, x) -> acc + x) FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_ARRAY_TRANSFORM_CAPTURE =
+            TableTestProgram.of(
+                            "calc-array-transform-capture",
+                            "validates calc node with a higher-order function whose lambda captures an outer column")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("a ARRAY<INT>", "base INT")
+                                    .producedBeforeRestore(Row.of(new Integer[] {1, 2, 3}, 10))
+                                    .producedAfterRestore(Row.of(new Integer[] {4, 5}, 100))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .consumedBeforeRestore(
+                                            Row.of((Object) new Integer[] {11, 12, 13}))
+                                    .consumedAfterRestore(Row.of((Object) new Integer[] {104, 105}))
+                                    .build())
+                    // the capture is lifted into a trailing lambda parameter (cap$0) and an
+                    // additional call operand, which must survive plan (de)serialization
+                    .runSql(
+                            "INSERT INTO sink_t SELECT ARRAY_TRANSFORM(a, x -> x + base) FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_ARRAY_ZIP_WITH =
+            TableTestProgram.of(
+                            "calc-array-zip-with",
+                            "validates calc node with the ARRAY_ZIP_WITH higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("a ARRAY<INT>", "b ARRAY<INT>")
+                                    .producedBeforeRestore(
+                                            Row.of(new Integer[] {1, 2, 3}, new Integer[] {10, 20}))
+                                    .producedAfterRestore(
+                                            Row.of(
+                                                    new Integer[] {4, 5},
+                                                    new Integer[] {40, 50, 60}))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .consumedBeforeRestore(
+                                            Row.of((Object) new Integer[] {11, 22, 3}))
+                                    .consumedAfterRestore(
+                                            Row.of((Object) new Integer[] {44, 55, 60}))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT ARRAY_ZIP_WITH(a, b, (x, y) -> "
+                                    + "COALESCE(x, 0) + COALESCE(y, 0)) FROM source_t")
+                    .build();
+
     public static final TableTestProgram CALC_PROJECT_PUSHDOWN =
             TableTestProgram.of(
                             "calc-project-pushdown", "validates calc node with project pushdown")

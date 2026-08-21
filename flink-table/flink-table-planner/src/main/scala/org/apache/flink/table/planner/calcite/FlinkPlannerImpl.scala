@@ -23,6 +23,7 @@ import org.apache.flink.sql.parser.dml._
 import org.apache.flink.sql.parser.dql._
 import org.apache.flink.sql.parser.validate.FlinkSqlConformance
 import org.apache.flink.table.api.{TableException, ValidationException}
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil
 import org.apache.flink.table.planner.hint.FlinkHints
 import org.apache.flink.table.planner.parse.CalciteParser
 import org.apache.flink.table.planner.plan.FlinkCalciteCatalogReader
@@ -33,9 +34,10 @@ import org.apache.calcite.config.NullCollation
 import org.apache.calcite.plan._
 import org.apache.calcite.prepare.CalciteCatalogReader
 import org.apache.calcite.rel.`type`.RelDataType
-import org.apache.calcite.rel.{RelFieldCollation, RelRoot}
+import org.apache.calcite.rel.{RelFieldCollation, RelNode, RelRoot}
+import org.apache.calcite.rel.RelHomogeneousShuttle
 import org.apache.calcite.rel.hint.RelHint
-import org.apache.calcite.rex.{RexInputRef, RexNode}
+import org.apache.calcite.rex.{RexCall, RexInputRef, RexLambda, RexNode, RexShuttle}
 import org.apache.calcite.sql.{SqlBasicCall, SqlCall, SqlHint, SqlKind, SqlNode, SqlNodeList, SqlOperatorTable, SqlSelect, SqlTableRef}
 import org.apache.calcite.sql.advise.SqlAdvisorValidator
 import org.apache.calcite.sql.util.SqlShuttle
@@ -232,10 +234,15 @@ class FlinkPlannerImpl(
           createSqlToRelConverter(sqlValidator, sqlToRelConverterConfig)
         }
 
-      sqlToRelConverter.convertQuery(validatedSqlNode, false, true)
+      val root = sqlToRelConverter.convertQuery(validatedSqlNode, false, true)
       // we disable automatic flattening in order to let composite types pass without modification
       // we might enable it again once Calcite has better support for structured types
       // root = root.withRel(sqlToRelConverter.flattenTypes(root.rel, true))
+
+      // Lift outer-column captures out of built-in higher-order function lambdas (see
+      // HigherOrderFunctionUtil). This must run before column trimming so that the captured columns
+      // are kept. The Table API performs the same lifting during its own expression conversion.
+      root.withRel(liftHigherOrderFunctionCaptures(root.rel))
 
       // TableEnvironment.optimize will execute the following
       // root = root.withRel(RelDecorrelator.decorrelateQuery(root.rel))
@@ -244,6 +251,44 @@ class FlinkPlannerImpl(
     } catch {
       case e: RelConversionException => throw new TableException(e.getMessage)
     }
+  }
+
+  /**
+   * Rewrites every higher-order function call in the tree (built-in and user-defined) so that
+   * outer-column captures of its lambda are lifted into additional lambda parameters and trailing
+   * call operands (see [[HigherOrderFunctionUtil]]). Calls without a capturing lambda are left
+   * unchanged.
+   */
+  private def liftHigherOrderFunctionCaptures(rel: RelNode): RelNode = {
+    val rexBuilder = rel.getCluster.getRexBuilder
+    val rexShuttle = new RexShuttle {
+      override def visitCall(call: RexCall): RexNode = {
+        val visited = super.visitCall(call).asInstanceOf[RexCall]
+        HigherOrderFunctionUtil.liftCaptures(visited, rexBuilder)
+      }
+
+      // RexShuttle#visitLambda in Calcite 1.41.0 (the pinned version) visits the body but returns
+      // the original lambda, discarding any rewrite. Rebuild the lambda with the visited body so
+      // that lifting a nested higher-order call (bottom-up) propagates to its enclosing lambda,
+      // where an outer capture then becomes a trailing operand that this pass can lift further out.
+      // CALCITE-7497 (fixVersion 1.42.0) gives the base class this same shape, so this override
+      // becomes redundant on the 1.42.0 upgrade.
+      override def visitLambda(lambda: RexLambda): RexNode = {
+        val newBody = lambda.getExpression.accept(this)
+        if (newBody eq lambda.getExpression) {
+          lambda
+        } else {
+          rexBuilder.makeLambdaCall(newBody, lambda.getParameters)
+        }
+      }
+    }
+    val relShuttle = new RelHomogeneousShuttle {
+      override def visit(node: RelNode): RelNode = {
+        val visited = super.visit(node)
+        visited.accept(rexShuttle)
+      }
+    }
+    rel.accept(relShuttle)
   }
 
   private class CheckContainQueryHintsShuttle extends SqlShuttle {

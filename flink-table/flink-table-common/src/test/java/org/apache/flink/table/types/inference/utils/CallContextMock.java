@@ -24,6 +24,7 @@ import org.apache.flink.table.functions.ModelSemantics;
 import org.apache.flink.table.functions.TableSemantics;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.LambdaInfo;
 
 import java.util.List;
 import java.util.Map;
@@ -53,6 +54,8 @@ public class CallContextMock implements CallContext {
     public Map<Integer, TableSemantics> tableSemantics;
 
     public Map<Integer, ModelSemantics> modelSemantics;
+
+    public Map<Integer, LambdaInfo> lambdaArguments;
 
     @Override
     public DataTypeFactory getDataTypeFactory() {
@@ -115,5 +118,13 @@ public class CallContextMock implements CallContext {
             return Optional.empty();
         }
         return Optional.ofNullable(modelSemantics.get(pos));
+    }
+
+    @Override
+    public Optional<LambdaInfo> getLambdaArgument(int pos) {
+        if (lambdaArguments == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(lambdaArguments.get(pos));
     }
 }
