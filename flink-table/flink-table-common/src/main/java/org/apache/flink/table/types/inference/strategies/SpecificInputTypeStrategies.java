@@ -228,6 +228,23 @@ public final class SpecificInputTypeStrategies {
     public static final InputTypeStrategy ARRAY_ZIP_WITH_INPUT =
             new ArrayZipWithInputTypeStrategy();
 
+    /**
+     * Input strategy for {@link BuiltInFunctionDefinitions#MAP_TRANSFORM_KEYS} and {@link
+     * BuiltInFunctionDefinitions#MAP_TRANSFORM_VALUES}. {@link
+     * BuiltInFunctionDefinitions#MAP_FILTER} uses the dedicated {@link #MAP_FILTER_INPUT} because
+     * its predicate lambda must return {@code BOOLEAN}.
+     */
+    public static final InputTypeStrategy MAP_TRANSFORM_INPUT =
+            new MapHigherOrderFunctionInputTypeStrategy(2, 1);
+
+    /** Input strategy for {@link BuiltInFunctionDefinitions#MAP_FILTER}. */
+    public static final InputTypeStrategy MAP_FILTER_INPUT =
+            new MapHigherOrderFunctionInputTypeStrategy(2, 1, LogicalTypeRoot.BOOLEAN);
+
+    /** Input strategy for {@link BuiltInFunctionDefinitions#MAP_ZIP_WITH}. */
+    public static final InputTypeStrategy MAP_ZIP_WITH_INPUT =
+            new MapHigherOrderFunctionInputTypeStrategy(3, 2);
+
     private SpecificInputTypeStrategies() {
         // no instantiation
     }

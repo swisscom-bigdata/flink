@@ -51,8 +51,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Batch execution coverage for the built-in array higher-order functions, plus the cross-cutting
- * SQL semantics that are asserted once rather than per runtime mode. The {@link
+ * Batch execution coverage for the built-in array and map higher-order functions, plus the
+ * cross-cutting SQL semantics that are asserted once rather than per runtime mode. The {@link
  * HigherOrderFunctionsITCase} suite runs the same built-ins in streaming mode; the duplication
  * across modes is deliberate, since batch/stream equivalence is a requirement of FLINK-31207.
  *
@@ -62,7 +62,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * friends). Grep for the method prefix to find an area:
  *
  * <ul>
- *   <li>{@code testArrayHigherOrderFunctions*} — the built-ins end to end, in batch.
+ *   <li>{@code testArrayHigherOrderFunctions*}, {@code testMapHigherOrderFunctions*} — the eight
+ *       built-ins end to end, in batch.
+ *   <li>{@code testMapZipWith*}, {@code testMapTransformKeys*} — logical map-key equality: type
+ *       coercion between key types, key nullability merging, and duplicate/null key rejection.
  *   <li>{@code testInvalidArguments*}, {@code testLambdaOutsideOfHigherOrderFunctionIsRejected},
  *       {@code testDuplicateLambdaParameterNamesAreRejected} — validation and signature error
  *       messages.
@@ -86,8 +89,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Only the first bullet duplicates {@link HigherOrderFunctionsITCase}; every other area is
  * mode-independent and has no streaming counterpart. Should {@link BuiltInFunctionTestBase} ever be
- * parameterized over the runtime mode, that method is what it would absorb — the rest of this file
- * would stay as it is.
+ * parameterized over the runtime mode, those methods are what it would absorb — the rest of this
+ * file would stay as it is.
  */
 class HigherOrderFunctionsBatchITCase {
 
@@ -121,6 +124,219 @@ class HigherOrderFunctionsBatchITCase {
             assertThat(row.getField(3)).isEqualTo(new Integer[] {11, 22, 3});
             assertThat(iterator).isExhausted();
         }
+    }
+
+    @Test
+    void testMapHigherOrderFunctionsBatch() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final java.util.Map<String, Integer> m1 = new java.util.LinkedHashMap<>();
+        m1.put("a", 1);
+        m1.put("b", 2);
+        final java.util.Map<String, Integer> m2 = new java.util.LinkedHashMap<>();
+        m2.put("a", 10);
+        m2.put("c", 30);
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "m2", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))),
+                        Row.of(m1, m2));
+        tEnv.createTemporaryView("t", input);
+
+        final Table result =
+                tEnv.sqlQuery(
+                        "SELECT MAP_FILTER(m, (k, v) -> v > 1),"
+                                + " MAP_TRANSFORM_KEYS(m, (k, v) -> k || '!'),"
+                                + " MAP_TRANSFORM_VALUES(m, (k, v) -> v * 10),"
+                                + " MAP_ZIP_WITH(m, m2, (k, v1, v2) -> COALESCE(v1, 0) + COALESCE(v2, 0))"
+                                + " FROM t");
+
+        try (final CloseableIterator<Row> iterator = result.execute().collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+
+            final java.util.Map<String, Integer> filtered = new java.util.HashMap<>();
+            filtered.put("b", 2);
+            assertThat(row.getField(0)).isEqualTo(filtered);
+
+            final java.util.Map<String, Integer> keys = new java.util.HashMap<>();
+            keys.put("a!", 1);
+            keys.put("b!", 2);
+            assertThat(row.getField(1)).isEqualTo(keys);
+
+            final java.util.Map<String, Integer> values = new java.util.HashMap<>();
+            values.put("a", 10);
+            values.put("b", 20);
+            assertThat(row.getField(2)).isEqualTo(values);
+
+            final java.util.Map<String, Integer> zipped = new java.util.HashMap<>();
+            zipped.put("a", 11);
+            zipped.put("b", 2);
+            zipped.put("c", 30);
+            assertThat(row.getField(3)).isEqualTo(zipped);
+
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    @Test
+    void testMapHigherOrderFunctionsWithCaptureAndNullMap() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+        m.put("a", 1);
+        m.put("b", 2);
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "mn", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                                DataTypes.FIELD("base", DataTypes.INT())),
+                        Row.of(m, null, 10));
+        tEnv.createTemporaryView("t", input);
+
+        // Every lambda closes over the outer column `base`. For the NULL map (`mn`) the result must
+        // be NULL and the lifted capture must not affect the outcome: this exercises the null-map
+        // short-circuit with a capture present, where map code generation evaluates the capture
+        // inside the non-null branch (MAP_FILTER / MAP_TRANSFORM_KEYS / MAP_TRANSFORM_VALUES).
+        final Table result =
+                tEnv.sqlQuery(
+                        "SELECT MAP_TRANSFORM_VALUES(m, (k, v) -> v + base),"
+                                + " MAP_TRANSFORM_KEYS(m, (k, v) -> k || CAST(base AS STRING)),"
+                                + " MAP_FILTER(m, (k, v) -> v > base - 9),"
+                                + " MAP_TRANSFORM_VALUES(mn, (k, v) -> v + base),"
+                                + " MAP_TRANSFORM_KEYS(mn, (k, v) -> k || CAST(base AS STRING)),"
+                                + " MAP_FILTER(mn, (k, v) -> v > base)"
+                                + " FROM t");
+
+        try (final CloseableIterator<Row> iterator = result.execute().collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+
+            final java.util.Map<String, Integer> values = new java.util.HashMap<>();
+            values.put("a", 11);
+            values.put("b", 12);
+            assertThat(row.getField(0)).isEqualTo(values);
+
+            final java.util.Map<String, Integer> keys = new java.util.HashMap<>();
+            keys.put("a10", 1);
+            keys.put("b10", 2);
+            assertThat(row.getField(1)).isEqualTo(keys);
+
+            final java.util.Map<String, Integer> filtered = new java.util.HashMap<>();
+            filtered.put("b", 2);
+            assertThat(row.getField(2)).isEqualTo(filtered);
+
+            // NULL map -> NULL, regardless of the captured column.
+            assertThat(row.getField(3)).isNull();
+            assertThat(row.getField(4)).isNull();
+            assertThat(row.getField(5)).isNull();
+
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    @Test
+    void testMapZipWithCoercesCompatibleKeyTypes() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporaryView("t", mapsWithIntAndBigintKeys(tEnv));
+
+        // A MAP<INT,..> and a MAP<BIGINT,..> have compatible but not identical key types. Both maps
+        // are cast to the common key type, so key 1 of the first map and key 1 of the second map
+        // are the same key of the merged map (rather than being rejected or, worse, counted twice).
+        final Table result =
+                tEnv.sqlQuery(
+                        "SELECT MAP_ZIP_WITH(mi, ml,"
+                                + " (k, v1, v2) -> COALESCE(v1, 0) + COALESCE(v2, 0))"
+                                + " FROM t");
+
+        final java.util.Map<Long, Integer> zipped = new java.util.HashMap<>();
+        zipped.put(1L, 11);
+        zipped.put(2L, 2);
+        zipped.put(3L, 30);
+        assertThat(result.getResolvedSchema().getColumnDataTypes().get(0))
+                .isEqualTo(DataTypes.MAP(DataTypes.BIGINT(), DataTypes.INT().notNull()).nullable());
+        try (final CloseableIterator<Row> iterator = result.execute().collect()) {
+            assertThat(iterator).hasNext();
+            assertThat(iterator.next().getField(0)).isEqualTo(zipped);
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    private static Table mapsWithIntAndBigintKeys(TableEnvironment tEnv) {
+        final java.util.Map<Integer, Integer> mInt = new java.util.LinkedHashMap<>();
+        mInt.put(1, 1);
+        mInt.put(2, 2);
+        final java.util.Map<Long, Integer> mLong = new java.util.LinkedHashMap<>();
+        mLong.put(1L, 10);
+        mLong.put(3L, 30);
+        return tEnv.fromValues(
+                DataTypes.ROW(
+                        DataTypes.FIELD("mi", DataTypes.MAP(DataTypes.INT(), DataTypes.INT())),
+                        DataTypes.FIELD("ml", DataTypes.MAP(DataTypes.BIGINT(), DataTypes.INT()))),
+                Row.of(mInt, mLong));
+    }
+
+    @Test
+    void testMapZipWithAcceptsKeyNullabilityDifference() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        // The first map's keys are INT NOT NULL (integer literals); the second map's keys are cast
+        // to nullable INT. Key types that differ only in nullability need no cast at all: the
+        // common key type is the nullable one and both maps are read as is.
+        final Table result =
+                tEnv.sqlQuery(
+                        "SELECT MAP_ZIP_WITH(MAP[1, 10], CAST(MAP[2, 20] AS MAP<INT, INT>),"
+                                + " (k, v1, v2) -> COALESCE(v1, 0) + COALESCE(v2, 0))");
+
+        try (final CloseableIterator<Row> iterator = result.execute().collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+            final java.util.Map<Integer, Integer> zipped = new java.util.HashMap<>();
+            zipped.put(1, 10);
+            zipped.put(2, 20);
+            assertThat(row.getField(0)).isEqualTo(zipped);
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    @Test
+    void testMapTransformKeysRejectsDuplicateAndNullKeys() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+        m.put("a", 1);
+        m.put("b", 2);
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))),
+                        Row.of(m));
+        tEnv.createTemporaryView("t", input);
+
+        // Map keys must be unique and non-NULL. A key transform that collapses two distinct keys to
+        // the same value, or produces a NULL key, is rejected at runtime (the check lives in the
+        // generated per-entry loop), not at validation.
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery(
+                                                "SELECT MAP_TRANSFORM_KEYS(m, (k, v) -> 'dup') FROM t")
+                                        .execute()
+                                        .collect()
+                                        .next())
+                .hasStackTraceContaining("MAP_TRANSFORM_KEYS produced a duplicate key");
+
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery(
+                                                "SELECT MAP_TRANSFORM_KEYS(m, (k, v) -> CAST(NULL AS STRING)) FROM t")
+                                        .execute()
+                                        .collect()
+                                        .next())
+                .hasStackTraceContaining(
+                        "MAP_TRANSFORM_KEYS: the transformed key must not be NULL");
     }
 
     @Test
@@ -181,6 +397,26 @@ class HigherOrderFunctionsBatchITCase {
                         + "'ARRAY_ZIP_WITH(<INTEGER ARRAY>, <INTEGER>, <FUNCTION(ANY, ANY) -> ANY>)'. "
                         + "Supported form(s): ARRAY_ZIP_WITH(array1 ARRAY, array2 ARRAY, "
                         + "lambda FUNCTION(ARRAY1_ELEMENT_TYPE, ARRAY2_ELEMENT_TYPE)->ANY)");
+        // the predicate of MAP_FILTER must be BOOLEAN, so a non-boolean lambda body is rejected
+        // with the function signature (the same rule as ARRAY_FILTER)
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_FILTER(m, (k, v) -> v + 1) FROM t",
+                "Invalid function call:\nMAP_FILTER(MAP<STRING, INT>, FUNCTION(2))",
+                "MAP_FILTER(map MAP, lambda FUNCTION(MAP_KEY_TYPE, MAP_VALUE_TYPE)->BOOLEAN)",
+                "The lambda expression at position 1 must return BOOLEAN, "
+                        + "but its body returns INT.");
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_FILTER(base, (k, v) -> true) FROM t",
+                "Cannot apply 'MAP_FILTER' to arguments of type "
+                        + "'MAP_FILTER(<INTEGER>, <FUNCTION(ANY, ANY) -> BOOLEAN>)'. "
+                        + "Supported form(s): "
+                        + "MAP_FILTER(map MAP, lambda FUNCTION(MAP_KEY_TYPE, MAP_VALUE_TYPE)->BOOLEAN)");
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_FILTER(m, k -> true) FROM t",
+                "The lambda expression at position 1 expects 2 parameter(s) but 1 were provided.");
         // a reducer whose body is not assignable to the accumulator type is rejected during
         // validation (rather than failing later during code generation)
         assertInvalidCall(
@@ -199,6 +435,28 @@ class HigherOrderFunctionsBatchITCase {
                         + "lambda FUNCTION(INIT_TYPE, ARRAY_ELEMENT_TYPE)->INIT_TYPE)",
                 "The reducer of ARRAY_REDUCE must return a type assignable to the accumulator "
                         + "type INT NOT NULL, but its body returns STRING NOT NULL.");
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_TRANSFORM_KEYS(base, (k, v) -> k) FROM t",
+                "Cannot apply 'MAP_TRANSFORM_KEYS' to arguments of type "
+                        + "'MAP_TRANSFORM_KEYS(<INTEGER>, <FUNCTION(ANY, ANY) -> ANY>)'. "
+                        + "Supported form(s): MAP_TRANSFORM_KEYS(map MAP, "
+                        + "lambda FUNCTION(MAP_KEY_TYPE, MAP_VALUE_TYPE)->ANY)");
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_TRANSFORM_VALUES(base, (k, v) -> v) FROM t",
+                "Cannot apply 'MAP_TRANSFORM_VALUES' to arguments of type "
+                        + "'MAP_TRANSFORM_VALUES(<INTEGER>, <FUNCTION(ANY, ANY) -> ANY>)'. "
+                        + "Supported form(s): MAP_TRANSFORM_VALUES(map MAP, "
+                        + "lambda FUNCTION(MAP_KEY_TYPE, MAP_VALUE_TYPE)->ANY)");
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_ZIP_WITH(m, base, (k, v1, v2) -> v1) FROM t",
+                "Cannot apply 'MAP_ZIP_WITH' to arguments of type "
+                        + "'MAP_ZIP_WITH(<(VARCHAR(2147483647), INTEGER) MAP>, <INTEGER>, "
+                        + "<FUNCTION(ANY, ANY, ANY) -> ANY>)'. Supported form(s): "
+                        + "MAP_ZIP_WITH(map1 MAP, map2 MAP, "
+                        + "lambda FUNCTION(MAP_KEY_TYPE, MAP1_VALUE_TYPE, MAP2_VALUE_TYPE)->ANY)");
     }
 
     @Test
@@ -242,6 +500,7 @@ class HigherOrderFunctionsBatchITCase {
                                 + " ARRAY_TRANSFORM(a, x -> ARRAY[ARRAY[x]][1][1]),"
                                 + " ARRAY_TRANSFORM(a, x -> ARRAY_TRANSFORM(ARRAY[x], y -> y + 1)[1]),"
                                 + " ARRAY_REDUCE(a, 0, (acc, x) -> ARRAY[acc, x][2]),"
+                                + " MAP_TRANSFORM_VALUES(m, (k, v) -> ARRAY[v, base][2]),"
                                 + " ARRAY_TRANSFORM(a, x -> CAST(ROW(x, base) AS ROW<c1 INT, c2 INT>).c1)"
                                 + " FROM t");
 
@@ -256,7 +515,8 @@ class HigherOrderFunctionsBatchITCase {
             assertThat(row.getField(5)).isEqualTo(new Integer[] {1, 2, 3});
             assertThat(row.getField(6)).isEqualTo(new Integer[] {2, 3, 4});
             assertThat(row.getField(7)).isEqualTo(3);
-            assertThat(row.getField(8)).isEqualTo(new Integer[] {1, 2, 3});
+            assertThat(row.getField(8)).isEqualTo(Collections.singletonMap("a", 10));
+            assertThat(row.getField(9)).isEqualTo(new Integer[] {1, 2, 3});
             assertThat(iterator).isExhausted();
         }
     }
@@ -273,7 +533,10 @@ class HigherOrderFunctionsBatchITCase {
                 tEnv.sqlQuery(
                         "SELECT ARRAY_TRANSFORM(a, x -> ARRAY[x, base]),"
                                 + " ARRAY_TRANSFORM(a, x -> ROW(x, base)),"
-                                + " ARRAY_ZIP_WITH(a, a, (x, y) -> ARRAY[x, y])"
+                                + " ARRAY_ZIP_WITH(a, a, (x, y) -> ARRAY[x, y]),"
+                                + " MAP_TRANSFORM_VALUES(MAP['a', 1, 'b', 2], (k, v) -> ARRAY[v]),"
+                                + " MAP_TRANSFORM_KEYS(MAP['a', 1, 'b', 2], (k, v) -> ARRAY[v]),"
+                                + " MAP_ZIP_WITH(MAP['a', 1, 'b', 2], MAP['a', 3], (k, v1, v2) -> ARRAY[v1])"
                                 + " FROM t");
 
         try (final CloseableIterator<Row> iterator = result.execute().collect()) {
@@ -283,6 +546,18 @@ class HigherOrderFunctionsBatchITCase {
             assertThat(row.getField(1))
                     .isEqualTo(new Row[] {Row.of(1, 10), Row.of(2, 10), Row.of(3, 10)});
             assertThat(row.getField(2)).isEqualTo(new Integer[][] {{1, 1}, {2, 2}, {3, 3}});
+
+            final java.util.Map<Object, Object> transformedValues = new java.util.HashMap<>();
+            transformedValues.put("a", Collections.singletonList(1));
+            transformedValues.put("b", Collections.singletonList(2));
+            assertThat(asComparableMap(row.getField(3))).isEqualTo(transformedValues);
+
+            final java.util.Map<Object, Object> transformedKeys = new java.util.HashMap<>();
+            transformedKeys.put(Collections.singletonList(1), 1);
+            transformedKeys.put(Collections.singletonList(2), 2);
+            assertThat(asComparableMap(row.getField(4))).isEqualTo(transformedKeys);
+
+            assertThat(asComparableMap(row.getField(5))).isEqualTo(transformedValues);
             assertThat(iterator).isExhausted();
         }
     }
@@ -497,6 +772,10 @@ class HigherOrderFunctionsBatchITCase {
                 "SELECT ARRAY_ZIP_WITH(a, a, (x, x) -> x) FROM t",
                 "Duplicate lambda parameter name 'x'. The parameters of a lambda expression "
                         + "must have unique names.");
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_ZIP_WITH(m, m, (k, v, k) -> v) FROM t",
+                "Duplicate lambda parameter name 'k'.");
         // a nested lambda may shadow an enclosing parameter, but not repeat its own
         assertInvalidCall(
                 tEnv,
@@ -523,6 +802,11 @@ class HigherOrderFunctionsBatchITCase {
                 tEnv,
                 "SELECT ARRAY_TRANSFORM(a, x -> x + SUM(x + base)) FROM t GROUP BY a",
                 "Aggregate functions over a lambda parameter are not supported");
+        assertInvalidCall(
+                tEnv,
+                "SELECT MAP_TRANSFORM_VALUES(m, (k, v) -> COUNT(v)) FROM t",
+                "Aggregate functions over a lambda parameter are not supported in the body of a "
+                        + "lambda expression. 'v' is a lambda parameter");
         // the parameter of an *enclosing* lambda counts as well
         assertInvalidCall(
                 tEnv,
@@ -801,7 +1085,11 @@ class HigherOrderFunctionsBatchITCase {
                         + " ARRAY_TRANSFORM(a, x -> x + base) AS c0,"
                         + " ARRAY_FILTER(a, x -> x > 1) AS c1,"
                         + " ARRAY_REDUCE(a, 0, (acc, x) -> acc + x) AS c2,"
-                        + " ARRAY_ZIP_WITH(a, a, (x, y) -> x + y) AS c3"
+                        + " ARRAY_ZIP_WITH(a, a, (x, y) -> x + y) AS c3,"
+                        + " MAP_FILTER(m, (k, v) -> v > 0) AS c4,"
+                        + " MAP_TRANSFORM_KEYS(m, (k, v) -> k || '!') AS c5,"
+                        + " MAP_TRANSFORM_VALUES(m, (k, v) -> v * 100) AS c6,"
+                        + " MAP_ZIP_WITH(m, m, (k, v1, v2) -> v1 + v2) AS c7"
                         + " FROM t");
 
         assertThat(expandedQueryOf(tEnv, "v"))
@@ -809,7 +1097,11 @@ class HigherOrderFunctionsBatchITCase {
                         "SELECT `ARRAY_TRANSFORM`(`t`.`a`, `x` -> `x` + `t`.`base`) AS `c0`,"
                                 + " `ARRAY_FILTER`(`t`.`a`, `x` -> `x` > 1) AS `c1`,"
                                 + " `ARRAY_REDUCE`(`t`.`a`, 0, (`acc`, `x`) -> `acc` + `x`) AS `c2`,"
-                                + " `ARRAY_ZIP_WITH`(`t`.`a`, `t`.`a`, (`x`, `y`) -> `x` + `y`) AS `c3`"
+                                + " `ARRAY_ZIP_WITH`(`t`.`a`, `t`.`a`, (`x`, `y`) -> `x` + `y`) AS `c3`,"
+                                + " `MAP_FILTER`(`t`.`m`, (`k`, `v`) -> `v` > 0) AS `c4`,"
+                                + " `MAP_TRANSFORM_KEYS`(`t`.`m`, (`k`, `v`) -> `k` || '!') AS `c5`,"
+                                + " `MAP_TRANSFORM_VALUES`(`t`.`m`, (`k`, `v`) -> `v` * 100) AS `c6`,"
+                                + " `MAP_ZIP_WITH`(`t`.`m`, `t`.`m`, (`k`, `v1`, `v2`) -> `v1` + `v2`) AS `c7`"
                                 + " FROM `default_catalog`.`default_database`.`t` AS `t`");
 
         try (final CloseableIterator<Row> iterator =
@@ -820,6 +1112,10 @@ class HigherOrderFunctionsBatchITCase {
             assertThat(row.getField(1)).isEqualTo(new Integer[] {2, 3});
             assertThat(row.getField(2)).isEqualTo(6);
             assertThat(row.getField(3)).isEqualTo(new Integer[] {2, 4, 6});
+            assertThat(row.getField(4)).isEqualTo(Collections.singletonMap("a", 1));
+            assertThat(row.getField(5)).isEqualTo(Collections.singletonMap("a!", 1));
+            assertThat(row.getField(6)).isEqualTo(Collections.singletonMap("a", 100));
+            assertThat(row.getField(7)).isEqualTo(Collections.singletonMap("a", 2));
             assertThat(iterator).isExhausted();
         }
     }
@@ -972,13 +1268,19 @@ class HigherOrderFunctionsBatchITCase {
     @Test
     void testLargeLambdaBodyIsSplitIntoSeparateMethods() throws Exception {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final java.util.Map<Integer, Integer> m = Collections.singletonMap(1, 2);
+        final java.util.Map<Integer, Integer> m2 = Collections.singletonMap(1, 5);
         tEnv.createTemporaryView(
                 "t",
                 tEnv.fromValues(
                         DataTypes.ROW(
                                 DataTypes.FIELD("a1", DataTypes.ARRAY(DataTypes.INT())),
-                                DataTypes.FIELD("a2", DataTypes.ARRAY(DataTypes.INT()))),
-                        Row.of(new Integer[] {1, 2}, new Integer[] {10, 20})));
+                                DataTypes.FIELD("a2", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "m", DataTypes.MAP(DataTypes.INT(), DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "m2", DataTypes.MAP(DataTypes.INT(), DataTypes.INT()))),
+                        Row.of(new Integer[] {1, 2}, new Integer[] {10, 20}, m, m2)));
 
         // The same expression outside of a lambda compiles, so the lambda must not regress.
         assertThat(collectSingleRow(tEnv, "SELECT " + longExpression("1") + " FROM t"))
@@ -1016,6 +1318,38 @@ class HigherOrderFunctionsBatchITCase {
                                         + ") FROM t"))
                 .isEqualTo(
                         new Integer[] {10 + longExpressionResult(1), 20 + longExpressionResult(2)});
+
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT MAP_FILTER(m, (k, v) -> "
+                                        + longExpression("v")
+                                        + " > 0) FROM t"))
+                .isEqualTo(m);
+
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT MAP_TRANSFORM_KEYS(m, (k, v) -> "
+                                        + longExpression("k")
+                                        + ") FROM t"))
+                .isEqualTo(Collections.singletonMap(longExpressionResult(1), 2));
+
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT MAP_TRANSFORM_VALUES(m, (k, v) -> "
+                                        + longExpression("v")
+                                        + ") FROM t"))
+                .isEqualTo(Collections.singletonMap(1, longExpressionResult(2)));
+
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT MAP_ZIP_WITH(m, m2, (k, v1, v2) -> v1 + v2 + "
+                                        + longExpression("k")
+                                        + ") FROM t"))
+                .isEqualTo(Collections.singletonMap(1, 2 + 5 + longExpressionResult(1)));
     }
 
     /** The number of terms in {@link #longExpression(String)}. */
@@ -1114,6 +1448,21 @@ class HigherOrderFunctionsBatchITCase {
                         DataTypes.FIELD("base", DataTypes.INT())),
                 Row.of(new Integer[] {1, 2, 3}, "abc", 10),
                 Row.of(new Integer[] {1, 2, 3}, "abc", 20));
+    }
+
+    /**
+     * Converts the array keys and values of a map to lists, so that maps holding arrays can be
+     * compared by value rather than by the identity of the Java arrays.
+     */
+    private static java.util.Map<Object, Object> asComparableMap(Object map) {
+        final java.util.Map<Object, Object> comparable = new java.util.HashMap<>();
+        ((java.util.Map<?, ?>) map)
+                .forEach((key, value) -> comparable.put(asComparable(key), asComparable(value)));
+        return comparable;
+    }
+
+    private static Object asComparable(Object value) {
+        return value instanceof Object[] ? Arrays.asList((Object[]) value) : value;
     }
 
     private static Object collectSingleRow(TableEnvironment tEnv, String sql) throws Exception {

@@ -956,6 +956,34 @@ higherorder:
       The shorter array is padded with `NULL` up to the length of the longer one, so the result length is `max(cardinality(array1), cardinality(array2))` and a padded position passes `NULL` for that side. Returns `NULL` if either array is `NULL`.
 
       E.g., `ARRAY_ZIP_WITH(ARRAY[1, 2, 3], ARRAY[10, 20, 30], (x, y) -> x + y)` returns `[11, 22, 33]`; `ARRAY_ZIP_WITH(ARRAY[1, 2], ARRAY[3, 4, 5], (x, y) -> COALESCE(x, 0) + y)` returns `[4, 6, 5]`.
+  - sql: MAP_FILTER(map, (key, value) -> predicate)
+    description: |
+      Returns the entries of `map` for which the predicate lambda returns `TRUE`, i.e. `(MAP<K, V>, (K, V) -> BOOLEAN)` returns `MAP<K, V>`. A `FALSE` or `NULL` predicate excludes the entry; keys and values are unchanged. The lambda body must return `BOOLEAN`; any other result type fails at validation.
+
+      Returns `NULL` if `map` is `NULL`. An empty map returns an empty map.
+
+      E.g., `MAP_FILTER(MAP['a', 1, 'b', -1], (k, v) -> v > 0)` returns `{a=1}`.
+  - sql: MAP_TRANSFORM_KEYS(map, (key, value) -> expression)
+    description: |
+      Returns a new map with each key replaced by the result of the lambda, i.e. `(MAP<K, V>, (K, V) -> K2)` returns `MAP<K2, V>`. The values are unchanged and the result key type `K2` is the type of the lambda body.
+
+      `MAP_TRANSFORM_KEYS` requires the keys it produces to be unique and non-`NULL`: the query fails if the lambda produces a duplicate key or a `NULL` key. This is a property of this function rather than of Flink's `MAP` type, which permits `NULL` keys — an input map with a `NULL` key is accepted and passed to the lambda like any other entry. Duplicate detection uses SQL logical (value) equality for all key types, including `BINARY`/`VARBINARY` and complex (`ARRAY`/`ROW`/`MAP`) keys, so two value-equal keys are always detected as duplicates. Returns `NULL` if `map` is `NULL`.
+
+      E.g., `MAP_TRANSFORM_KEYS(MAP['a', 1, 'b', 2], (k, v) -> UPPER(k))` returns `{A=1, B=2}`.
+  - sql: MAP_TRANSFORM_VALUES(map, (key, value) -> expression)
+    description: |
+      Returns a new map with each value replaced by the result of the lambda, i.e. `(MAP<K, V>, (K, V) -> V2)` returns `MAP<K, V2>`. The keys are unchanged and the result value type `V2` is the type of the lambda body.
+
+      Returns `NULL` if `map` is `NULL`. An entry whose value is `NULL` is passed to the lambda like any other entry.
+
+      E.g., `MAP_TRANSFORM_VALUES(MAP['a', 1, 'b', 2], (k, v) -> v * 10)` returns `{a=10, b=20}`.
+  - sql: MAP_ZIP_WITH(map1, map2, (key, value1, value2) -> expression)
+    description: |
+      Merges `map1` and `map2` over the union of their keys, i.e. `(MAP<K, V1>, MAP<K, V2>, (K, V1, V2) -> R)` returns `MAP<K, R>`. For each key the lambda receives the key, the value from `map1` (`NULL` if the key is absent there) and the value from `map2` (`NULL` if absent); its result becomes the value for that key.
+
+      Both maps' key types are generalized to their common type `K`, e.g. `MAP<INT, V1>` and `MAP<BIGINT, V2>` are merged into `MAP<BIGINT, R>`; key types without a common type (e.g. `INT` and `STRING`) are rejected. The result value type `R` is the type of the lambda body. Returns `NULL` if either map is `NULL`.
+
+      E.g., `MAP_ZIP_WITH(MAP['a', 1], MAP['a', 2, 'b', 3], (k, v1, v2) -> COALESCE(v1, 0) + COALESCE(v2, 0))` returns `{a=3, b=3}`.
 
 json:
   - sql: IS JSON [ { VALUE | SCALAR | ARRAY | OBJECT } ]

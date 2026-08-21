@@ -35,6 +35,8 @@ import org.apache.flink.types.variant.VariantBuilder;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** {@link TableTestProgram}s for testing {@link StreamExecCalc} and {@link BatchExecCalc}. */
 public class CalcTestPrograms {
@@ -181,6 +183,98 @@ public class CalcTestPrograms {
                             "INSERT INTO sink_t SELECT ARRAY_ZIP_WITH(a, b, (x, y) -> "
                                     + "COALESCE(x, 0) + COALESCE(y, 0)) FROM source_t")
                     .build();
+
+    public static final TableTestProgram CALC_MAP_FILTER =
+            TableTestProgram.of(
+                            "calc-map-filter",
+                            "validates calc node with the MAP_FILTER higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("m MAP<STRING, INT>")
+                                    .producedBeforeRestore(Row.of(map("a", 1, "b", 2)))
+                                    .producedAfterRestore(Row.of(map("c", 3, "d", 0)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("m MAP<STRING, INT>")
+                                    .consumedBeforeRestore(Row.of(map("b", 2)))
+                                    .consumedAfterRestore(Row.of(map("c", 3)))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT MAP_FILTER(m, (k, v) -> v > 1) FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_MAP_TRANSFORM_KEYS =
+            TableTestProgram.of(
+                            "calc-map-transform-keys",
+                            "validates calc node with the MAP_TRANSFORM_KEYS higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("m MAP<STRING, INT>")
+                                    .producedBeforeRestore(Row.of(map("a", 1, "b", 2)))
+                                    .producedAfterRestore(Row.of(map("c", 3)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("m MAP<STRING, INT>")
+                                    .consumedBeforeRestore(Row.of(map("a!", 1, "b!", 2)))
+                                    .consumedAfterRestore(Row.of(map("c!", 3)))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT MAP_TRANSFORM_KEYS(m, (k, v) -> k || '!') "
+                                    + "FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_MAP_TRANSFORM_VALUES =
+            TableTestProgram.of(
+                            "calc-map-transform-values",
+                            "validates calc node with the MAP_TRANSFORM_VALUES higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("m MAP<STRING, INT>")
+                                    .producedBeforeRestore(Row.of(map("a", 1, "b", 2)))
+                                    .producedAfterRestore(Row.of(map("c", 3)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("m MAP<STRING, INT>")
+                                    .consumedBeforeRestore(Row.of(map("a", 10, "b", 20)))
+                                    .consumedAfterRestore(Row.of(map("c", 30)))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT MAP_TRANSFORM_VALUES(m, (k, v) -> v * 10) "
+                                    + "FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_MAP_ZIP_WITH =
+            TableTestProgram.of(
+                            "calc-map-zip-with",
+                            "validates calc node with the MAP_ZIP_WITH higher-order function")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("m1 MAP<STRING, INT>", "m2 MAP<STRING, INT>")
+                                    .producedBeforeRestore(
+                                            Row.of(map("a", 1, "b", 2), map("a", 10, "c", 30)))
+                                    .producedAfterRestore(Row.of(map("x", 5), map("x", 1, "y", 2)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("m MAP<STRING, INT>")
+                                    .consumedBeforeRestore(Row.of(map("a", 11, "b", 2, "c", 30)))
+                                    .consumedAfterRestore(Row.of(map("x", 6, "y", 2)))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT MAP_ZIP_WITH(m1, m2, (k, v1, v2) -> "
+                                    + "COALESCE(v1, 0) + COALESCE(v2, 0)) FROM source_t")
+                    .build();
+
+    private static Map<String, Integer> map(Object... keyValues) {
+        final Map<String, Integer> result = new LinkedHashMap<>();
+        for (int i = 0; i < keyValues.length; i += 2) {
+            result.put((String) keyValues[i], (Integer) keyValues[i + 1]);
+        }
+        return result;
+    }
 
     public static final TableTestProgram CALC_PROJECT_PUSHDOWN =
             TableTestProgram.of(

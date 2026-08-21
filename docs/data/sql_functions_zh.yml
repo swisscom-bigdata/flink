@@ -1088,6 +1088,34 @@ higherorder:
       较短的数组会用 `NULL` 补齐到较长数组的长度，因此结果的长度为 `max(cardinality(array1), cardinality(array2))`，补齐的位置会为对应的一侧传入 `NULL`。如果任意一个数组为 `NULL`，则返回 `NULL`。
 
       例如，`ARRAY_ZIP_WITH(ARRAY[1, 2, 3], ARRAY[10, 20, 30], (x, y) -> x + y)` 返回 `[11, 22, 33]`；`ARRAY_ZIP_WITH(ARRAY[1, 2], ARRAY[3, 4, 5], (x, y) -> COALESCE(x, 0) + y)` 返回 `[4, 6, 5]`。
+  - sql: MAP_FILTER(map, (key, value) -> predicate)
+    description: |
+      返回 `map` 中谓词 lambda 返回 `TRUE` 的 entry，即 `(MAP<K, V>, (K, V) -> BOOLEAN)` 返回 `MAP<K, V>`。谓词为 `FALSE` 或 `NULL` 的 entry 会被排除；key 和 value 保持不变。lambda 的函数体必须返回 `BOOLEAN`，其它结果类型会导致校验错误。
+
+      如果 `map` 为 `NULL`，则返回 `NULL`。空 map 返回空 map。
+
+      例如，`MAP_FILTER(MAP['a', 1, 'b', -1], (k, v) -> v > 0)` 返回 `{a=1}`。
+  - sql: MAP_TRANSFORM_KEYS(map, (key, value) -> expression)
+    description: |
+      返回一个新的 map，其中每个 key 都被 lambda 的结果替换，即 `(MAP<K, V>, (K, V) -> K2)` 返回 `MAP<K2, V>`。value 保持不变，结果的 key 类型 `K2` 就是 lambda 函数体的类型。
+
+      `MAP_TRANSFORM_KEYS` 要求它产生的 key 必须唯一且不为 `NULL`：如果 lambda 产生重复的 key 或者 `NULL` key，查询会失败。这是该函数自身的性质，而不是 Flink `MAP` 类型的性质——`MAP` 类型允许 `NULL` key，输入 map 中的 `NULL` key 会被接受，并像其他条目一样传给 lambda。重复检测对所有 key 类型都使用 SQL 的逻辑（值）相等，包括 `BINARY`/`VARBINARY` 以及复合类型（`ARRAY`/`ROW`/`MAP`）的 key，因此两个值相等的 key 一定会被识别为重复。如果 `map` 为 `NULL`，则返回 `NULL`。
+
+      例如，`MAP_TRANSFORM_KEYS(MAP['a', 1, 'b', 2], (k, v) -> UPPER(k))` 返回 `{A=1, B=2}`。
+  - sql: MAP_TRANSFORM_VALUES(map, (key, value) -> expression)
+    description: |
+      返回一个新的 map，其中每个 value 都被 lambda 的结果替换，即 `(MAP<K, V>, (K, V) -> V2)` 返回 `MAP<K, V2>`。key 保持不变，结果的 value 类型 `V2` 就是 lambda 函数体的类型。
+
+      如果 `map` 为 `NULL`，则返回 `NULL`。value 为 `NULL` 的 entry 会和其它 entry 一样传给 lambda。
+
+      例如，`MAP_TRANSFORM_VALUES(MAP['a', 1, 'b', 2], (k, v) -> v * 10)` 返回 `{a=10, b=20}`。
+  - sql: MAP_ZIP_WITH(map1, map2, (key, value1, value2) -> expression)
+    description: |
+      在 `map1` 和 `map2` 的 key 的并集上合并这两个 map，即 `(MAP<K, V1>, MAP<K, V2>, (K, V1, V2) -> R)` 返回 `MAP<K, R>`。对每个 key，lambda 接收该 key、来自 `map1` 的 value（如果该 key 在 `map1` 中不存在则为 `NULL`）以及来自 `map2` 的 value（如果不存在则为 `NULL`）；其结果成为该 key 对应的 value。
+
+      两个 map 的 key 类型会被泛化为它们的公共类型 `K`，例如 `MAP<INT, V1>` 和 `MAP<BIGINT, V2>` 会被合并为 `MAP<BIGINT, R>`；不存在公共类型的 key 类型（例如 `INT` 和 `STRING`）会被拒绝。结果的 value 类型 `R` 就是 lambda 函数体的类型。如果任意一个 map 为 `NULL`，则返回 `NULL`。
+
+      例如，`MAP_ZIP_WITH(MAP['a', 1], MAP['a', 2, 'b', 3], (k, v1, v2) -> COALESCE(v1, 0) + COALESCE(v2, 0))` 返回 `{a=3, b=3}`。
 
 json:
   - sql: IS JSON [ { VALUE | SCALAR | ARRAY | OBJECT } ]
