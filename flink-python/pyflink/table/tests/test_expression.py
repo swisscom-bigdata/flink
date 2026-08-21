@@ -145,6 +145,14 @@ class PyFlinkBatchExpressionTests(PyFlinkTestCase):
                          _render(expr1.array_reduce(0, lambda acc, x: acc + x)))
         self.assertEqual('ARRAY_ZIP_WITH(a, b, (p0, p1) -> plus(p0, p1))',
                          _render(expr1.array_zip_with(expr2, lambda x, y: x + y)))
+        self.assertEqual('MAP_FILTER(a, (p0, p1) -> greaterThan(p1, 0))',
+                         _render(expr1.map_filter(lambda k, v: v > 0)))
+        self.assertEqual('MAP_TRANSFORM_KEYS(a, (p0, p1) -> plus(p0, 1))',
+                         _render(expr1.map_transform_keys(lambda k, v: k + 1)))
+        self.assertEqual('MAP_TRANSFORM_VALUES(a, (p0, p1) -> plus(p1, 1))',
+                         _render(expr1.map_transform_values(lambda k, v: v + 1)))
+        self.assertEqual('MAP_ZIP_WITH(a, b, (p0, p1, p2) -> plus(p1, p2))',
+                         _render(expr1.map_zip_with(expr2, lambda k, v1, v2: v1 + v2)))
         self.assertEqual("as(a, 'a', 'b', 'c')", str(expr1.alias('a', 'b', 'c')))
         self.assertEqual('cast(a, INT)', str(expr1.cast(DataTypes.INT())))
         self.assertEqual('asc(a)', str(expr1.asc))

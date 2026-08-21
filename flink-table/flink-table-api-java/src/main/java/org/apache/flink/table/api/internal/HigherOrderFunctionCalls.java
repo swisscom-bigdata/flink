@@ -24,6 +24,7 @@ import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
 import org.apache.flink.table.functions.BuiltInFunctionDefinition;
 import org.apache.flink.util.function.Function1;
 import org.apache.flink.util.function.Function2;
+import org.apache.flink.util.function.Function3;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -61,6 +62,20 @@ final class HigherOrderFunctionCalls {
                 definition,
                 2,
                 refs -> lambdaFunction.apply(refs.get(0), refs.get(1)),
+                leadingOperands);
+    }
+
+    /** Builds a call to a higher-order function taking a lambda with three parameters. */
+    static <InType, OutType> OutType lambdaCall(
+            BaseExpressions<InType, OutType> input,
+            BuiltInFunctionDefinition definition,
+            Function3<OutType, OutType, OutType, OutType> lambdaFunction,
+            Expression... leadingOperands) {
+        return lambdaCall(
+                input,
+                definition,
+                3,
+                refs -> lambdaFunction.apply(refs.get(0), refs.get(1), refs.get(2)),
                 leadingOperands);
     }
 

@@ -30,8 +30,11 @@ class HigherOrderFunctionTests(object):
 
     Unlike ``test_expression.py`` (which only checks the rendered expression string), these tests
     actually execute the resulting job so that the Python lambda adapters (``_LambdaFunction1``,
-    ``_LambdaFunction2``), the outer-column capture lifting and the input-type validation are all
-    exercised through a real ``TableEnvironment``.
+    ``_LambdaFunction2``, ``_LambdaFunction3``), the outer-column capture lifting and the
+    input-type validation are all exercised through a real ``TableEnvironment``.
+
+    Results are collected as rows (rather than via ``to_pandas``) so that the assertions do not
+    depend on Arrow's pandas conversion, which cannot represent a nullable map key.
     """
 
     def _array_source(self):
@@ -62,6 +65,18 @@ class HigherOrderFunctionTests(object):
             .select(col("a").array_reduce(lit(0), lambda acc, x: acc + x).alias("b"))
         self._assert_rows(table, [Row(6), Row(9)])
 
+    def test_map_zip_with_ternary_lambda(self):
+        # MAP_ZIP_WITH with a three-parameter lambda (org.apache.flink.util.function.TriFunction
+        # adapter).
+        t = self.t_env.from_elements(
+            [({1: 10, 2: 20}, {1: 1, 2: 2},)],
+            DataTypes.ROW([
+                DataTypes.FIELD("a", DataTypes.MAP(DataTypes.INT(), DataTypes.INT())),
+                DataTypes.FIELD("b", DataTypes.MAP(DataTypes.INT(), DataTypes.INT()))]))
+        table = t \
+            .select(col("a").map_zip_with(col("b"), lambda k, v1, v2: v1 + v2).alias("c"))
+        self._assert_rows(table, [Row({1: 11, 2: 22})])
+
     def test_lambda_captures_outer_column(self):
         # The lambda body references the outer column ``factor``, which must be lifted into a
         # trailing call operand so column trimming keeps it (see HigherOrderFunctionUtil).
@@ -73,6 +88,18 @@ class HigherOrderFunctionTests(object):
         table = t \
             .select(col("a").array_transform(lambda x: x + col("factor")).alias("b"))
         self._assert_rows(table, [Row([11, 12, 13]), Row([104, 105])])
+
+    def test_map_zip_with_disjoint_keys(self):
+        # Disjoint key sets: the result is the union of both key sets and every entry sees a NULL on
+        # exactly one side, so each map contributes its own value untouched.
+        t = self.t_env.from_elements(
+            [({1: 10, 2: 20}, {3: 30, 4: 40},)],
+            DataTypes.ROW([
+                DataTypes.FIELD("a", DataTypes.MAP(DataTypes.INT(), DataTypes.INT())),
+                DataTypes.FIELD("b", DataTypes.MAP(DataTypes.INT(), DataTypes.INT()))]))
+        table = t \
+            .select(col("a").map_zip_with(col("b"), lambda k, v1, v2: v1.if_null(v2)).alias("c"))
+        self._assert_rows(table, [Row({1: 10, 2: 20, 3: 30, 4: 40})])
 
     def test_nested_lambdas(self):
         # A lambda nested in another lambda, whose body captures the enclosing lambda's parameter.

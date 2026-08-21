@@ -67,6 +67,8 @@ class HigherOrderFunctionValidationParityTest {
                 "CREATE TEMPORARY VIEW t AS SELECT "
                         + "ARRAY[1, 2, 3] AS arr_int, "
                         + "ARRAY['a', 'b'] AS arr_str, "
+                        + "MAP[1, 10] AS map_int_int, "
+                        + "MAP['k', 10] AS map_str_int, "
                         + "CAST(5 AS INT) AS an_int");
     }
 
@@ -77,6 +79,12 @@ class HigherOrderFunctionValidationParityTest {
                         "predicate must be BOOLEAN",
                         "ARRAY_FILTER(arr_int, x -> x + 1)",
                         $("arr_int").arrayFilter(x -> x.plus(1)),
+                        "BOOLEAN"),
+                new Case(
+                        BuiltInFunctionDefinitions.MAP_FILTER,
+                        "predicate must be BOOLEAN",
+                        "MAP_FILTER(map_int_int, (k, v) -> k + v)",
+                        $("map_int_int").mapFilter((k, v) -> k.plus(v)),
                         "BOOLEAN"),
                 new Case(
                         BuiltInFunctionDefinitions.ARRAY_TRANSFORM,
@@ -142,10 +150,28 @@ class HigherOrderFunctionValidationParityTest {
                                         (acc, x) -> acc.cast(DataTypes.TIMESTAMP_LTZ(3))),
                         null),
                 new Case(
+                        BuiltInFunctionDefinitions.MAP_ZIP_WITH,
+                        "requires key types with a common type",
+                        "MAP_ZIP_WITH(map_int_int, map_str_int, (k, v1, v2) -> v1)",
+                        $("map_int_int").mapZipWith($("map_str_int"), (k, v1, v2) -> v1),
+                        null),
+                new Case(
                         BuiltInFunctionDefinitions.ARRAY_ZIP_WITH,
                         "second argument must be an array",
                         "ARRAY_ZIP_WITH(arr_int, an_int, (x, y) -> x)",
                         $("arr_int").arrayZipWith($("an_int"), (x, y) -> x),
+                        null),
+                new Case(
+                        BuiltInFunctionDefinitions.MAP_TRANSFORM_KEYS,
+                        "first argument must be a map",
+                        "MAP_TRANSFORM_KEYS(an_int, (k, v) -> k)",
+                        $("an_int").mapTransformKeys((k, v) -> k),
+                        null),
+                new Case(
+                        BuiltInFunctionDefinitions.MAP_TRANSFORM_VALUES,
+                        "first argument must be a map",
+                        "MAP_TRANSFORM_VALUES(arr_int, (k, v) -> v)",
+                        $("arr_int").mapTransformValues((k, v) -> v),
                         null));
     }
 
