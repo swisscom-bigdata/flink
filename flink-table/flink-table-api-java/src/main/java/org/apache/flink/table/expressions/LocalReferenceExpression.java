@@ -18,7 +18,7 @@
 
 package org.apache.flink.table.expressions;
 
-import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.table.operations.QueryOperation;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.utils.EncodingUtils;
@@ -29,10 +29,17 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Reference to entity local to a certain {@link QueryOperation}. That entity does not come from any
- * of the Operations input. It might be for example a group window in window aggregation.
+ * Reference to a named, typed entity that is bound by an enclosing construct rather than by one of
+ * the inputs of the query.
+ *
+ * <p>Within the body of a {@link LambdaExpression}, every reference to one of the lambda's
+ * parameters is a local reference of this kind; the enclosing higher-order call determines the
+ * {@link #getOutputDataType() data type}. Local references are also used for entities that a {@link
+ * QueryOperation} introduces itself, such as the alias of a group window in a window aggregation.
+ *
+ * <p>Instances are created by the framework while resolving an expression.
  */
-@Internal
+@PublicEvolving
 public class LocalReferenceExpression implements ResolvedExpression {
 
     private final String name;

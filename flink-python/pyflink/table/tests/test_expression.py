@@ -16,6 +16,7 @@
 # limitations under the License.
 ################################################################################
 import datetime
+import re
 import unittest
 
 from py4j.protocol import Py4JJavaError
@@ -32,6 +33,22 @@ from pyflink.table.expressions import (col, lit, range_, and_, or_, current_date
                                        to_timestamp_ltz, from_unixtime, to_date, to_timestamp,
                                        convert_tz, unix_timestamp)
 from pyflink.testing.test_case_utils import PyFlinkTestCase
+
+
+def _render(expression):
+    """
+    Renders an expression with the generated lambda parameter names (``$lambdaParam$<n>``, taken
+    from a global counter) replaced by ``p0``, ``p1``, ... in order of appearance, so that the
+    rendering of a higher-order function call can be compared exactly.
+    """
+    rendered = str(expression)
+    names = []
+    for name in re.findall(r'\$lambdaParam\$\d+', rendered):
+        if name not in names:
+            names.append(name)
+    for index, name in enumerate(names):
+        rendered = rendered.replace(name, 'p%d' % index)
+    return rendered
 
 
 class PyFlinkBatchExpressionTests(PyFlinkTestCase):
@@ -118,6 +135,24 @@ class PyFlinkBatchExpressionTests(PyFlinkTestCase):
         self.assertEqual('varSamp(a)', str(expr1.var_samp))
         self.assertEqual('collect(a)', str(expr1.collect))
         self.assertEqual('ARRAY_AGG(a)', str(expr1.array_agg))
+        # the lambda parameter names are generated, so they are normalized to p0, p1, ... before
+        # the rendered expression (including the lambda body) is compared
+        self.assertEqual('ARRAY_TRANSFORM(a, p0 -> plus(p0, 1))',
+                         _render(expr1.array_transform(lambda x: x + 1)))
+        self.assertEqual('ARRAY_FILTER(a, p0 -> greaterThan(p0, 1))',
+                         _render(expr1.array_filter(lambda x: x > 1)))
+        self.assertEqual('ARRAY_REDUCE(a, 0, (p0, p1) -> plus(p0, p1))',
+                         _render(expr1.array_reduce(0, lambda acc, x: acc + x)))
+        self.assertEqual('ARRAY_ZIP_WITH(a, b, (p0, p1) -> plus(p0, p1))',
+                         _render(expr1.array_zip_with(expr2, lambda x, y: x + y)))
+        self.assertEqual('MAP_FILTER(a, (p0, p1) -> greaterThan(p1, 0))',
+                         _render(expr1.map_filter(lambda k, v: v > 0)))
+        self.assertEqual('MAP_TRANSFORM_KEYS(a, (p0, p1) -> plus(p0, 1))',
+                         _render(expr1.map_transform_keys(lambda k, v: k + 1)))
+        self.assertEqual('MAP_TRANSFORM_VALUES(a, (p0, p1) -> plus(p1, 1))',
+                         _render(expr1.map_transform_values(lambda k, v: v + 1)))
+        self.assertEqual('MAP_ZIP_WITH(a, b, (p0, p1, p2) -> plus(p1, p2))',
+                         _render(expr1.map_zip_with(expr2, lambda k, v1, v2: v1 + v2)))
         self.assertEqual("as(a, 'a', 'b', 'c')", str(expr1.alias('a', 'b', 'c')))
         self.assertEqual('cast(a, INT)', str(expr1.cast(DataTypes.INT())))
         self.assertEqual('asc(a)', str(expr1.asc))

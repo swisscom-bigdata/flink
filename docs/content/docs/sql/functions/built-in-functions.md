@@ -111,11 +111,40 @@ Those constructs may not be evaluated over a lambda *parameter*, however: a para
 element, not a set of rows, so `ARRAY_TRANSFORM(vals, x -> SUM(x))` is a validation error. Use
 `ARRAY_REDUCE` to fold an array's own elements. A table function cannot appear in a body either,
 since it produces rows rather than a value, nor can an asynchronous scalar function, whose result
-only arrives after the body has been evaluated.
+only arrives after the body has been evaluated. The Table API follows the same rules (it has no
+sub-query expression).
 
 Lambdas are only valid as arguments of higher-order functions; using one anywhere else is a
 validation error. They are not values: a lambda cannot be stored in a column, assigned to a
 variable, or returned from a query.
+
+In the Table API the same functions are available as expression methods that take a host-language
+lambda. It receives the expression(s) for the lambda parameter(s) and returns the body expression:
+
+{{< tabs "higher-order-functions" >}}
+{{< tab "Java" >}}
+```java
+table.select(
+    $("vals").arrayTransform(x -> x.times(10)),
+    $("vals").arrayFilter(x -> x.isGreater(1)),
+    $("vals").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
+    // a lambda body may capture other columns
+    $("vals").arrayTransform(x -> x.plus($("base"))),
+    $("m").mapTransformValues((k, v) -> v.times(10)));
+```
+{{< /tab >}}
+{{< tab "Python" >}}
+```python
+table.select(
+    col("vals").array_transform(lambda x: x * 10),
+    col("vals").array_filter(lambda x: x > 1),
+    col("vals").array_reduce(lit(0), lambda acc, x: acc + x),
+    # a lambda body may capture other columns
+    col("vals").array_transform(lambda x: x + col("base")),
+    col("m").map_transform_values(lambda k, v: v * 10))
+```
+{{< /tab >}}
+{{< /tabs >}}
 
 {{< sql_functions "higherorder" >}}
 

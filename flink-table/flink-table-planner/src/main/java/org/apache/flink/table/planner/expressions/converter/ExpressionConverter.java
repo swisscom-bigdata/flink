@@ -27,6 +27,7 @@ import org.apache.flink.table.expressions.CallExpression;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.ExpressionVisitor;
 import org.apache.flink.table.expressions.FieldReferenceExpression;
+import org.apache.flink.table.expressions.LambdaExpression;
 import org.apache.flink.table.expressions.LocalReferenceExpression;
 import org.apache.flink.table.expressions.ModelReferenceExpression;
 import org.apache.flink.table.expressions.NestedFieldReferenceExpression;
@@ -36,6 +37,7 @@ import org.apache.flink.table.expressions.TypeLiteralExpression;
 import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.factories.ModelProviderFactory;
+import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.ml.ModelProvider;
 import org.apache.flink.table.module.Module;
 import org.apache.flink.table.planner.calcite.FlinkContext;
@@ -45,6 +47,7 @@ import org.apache.flink.table.planner.calcite.RexModelCall;
 import org.apache.flink.table.planner.expressions.RexNodeExpression;
 import org.apache.flink.table.planner.expressions.converter.CallExpressionConvertRule.ConvertContext;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
@@ -56,7 +59,10 @@ import org.apache.calcite.avatica.util.ByteString;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.util.DateString;
@@ -71,8 +77,11 @@ import java.time.LocalTime;
 import java.time.Period;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoField;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -85,9 +94,27 @@ import static org.apache.flink.util.OptionalUtils.firstPresent;
 /** Visit expression to generator {@link RexNode}. */
 public class ExpressionConverter implements ExpressionVisitor<RexNode> {
 
+    /**
+     * Built-in higher-order functions and their corresponding {@link SqlOperator}. Their lambda
+     * argument requires dedicated conversion, see {@link #visitHigherOrderFunction}.
+     */
+    private static final Map<FunctionDefinition, SqlOperator> HIGHER_ORDER_FUNCTION_OPERATORS =
+            new HashMap<>();
+
+    static {
+    }
+
     private final RelBuilder relBuilder;
     private final FlinkTypeFactory typeFactory;
     private final DataTypeFactory dataTypeFactory;
+
+    /**
+     * Bindings of lambda parameter names (by {@link LocalReferenceExpression#getName()}) to the
+     * corresponding {@link RexLambdaRef} while the body of an enclosing lambda is being converted.
+     * Saved and restored around each lambda so that nested/shadowing lambdas do not clobber an
+     * enclosing binding.
+     */
+    private final Map<String, RexLambdaRef> lambdaParamRefs = new HashMap<>();
 
     public ExpressionConverter(RelBuilder relBuilder) {
         this.relBuilder = relBuilder;
@@ -107,11 +134,23 @@ public class ExpressionConverter implements ExpressionVisitor<RexNode> {
 
     @Override
     public RexNode visit(CallExpression call) {
+        final SqlOperator higherOrderOperator =
+                HIGHER_ORDER_FUNCTION_OPERATORS.get(call.getFunctionDefinition());
+        if (higherOrderOperator != null) {
+            return visitHigherOrderFunction(call, higherOrderOperator);
+        }
         boolean isBatchMode = unwrapContext(relBuilder).isBatchMode();
         for (CallExpressionConvertRule rule : getFunctionConvertChain(isBatchMode)) {
             Optional<RexNode> converted = rule.convert(call, newFunctionContext());
             if (converted.isPresent()) {
-                return converted.get();
+                final RexNode result = converted.get();
+                // A user-defined higher-order function may carry a lambda that closes over outer
+                // columns; lift those captures out of the (closed) lambda (a no-op otherwise).
+                if (result instanceof RexCall) {
+                    return HigherOrderFunctionUtil.liftCaptures(
+                            (RexCall) result, relBuilder.getRexBuilder());
+                }
+                return result;
             }
         }
         throw new RuntimeException("Unknown call expression: " + call);
@@ -250,8 +289,15 @@ public class ExpressionConverter implements ExpressionVisitor<RexNode> {
     public RexNode visit(Expression other) {
         if (other instanceof RexNodeExpression) {
             return ((RexNodeExpression) other).getRexNode();
+        } else if (other instanceof LambdaExpression) {
+            return visitLambda((LambdaExpression) other);
         } else if (other instanceof LocalReferenceExpression) {
             final LocalReferenceExpression local = (LocalReferenceExpression) other;
+            // a lambda parameter reference is converted to the corresponding lambda reference
+            final RexLambdaRef lambdaRef = lambdaParamRefs.get(local.getName());
+            if (lambdaRef != null) {
+                return lambdaRef;
+            }
             // check whether the local field reference can actually be resolved to an existing
             // field otherwise preserve the locality attribute
             RelNode inputNode;
@@ -273,6 +319,76 @@ public class ExpressionConverter implements ExpressionVisitor<RexNode> {
         } else {
             throw new UnsupportedOperationException(
                     other.getClass().getSimpleName() + ":" + other.toString());
+        }
+    }
+
+    /**
+     * Converts a call to a built-in higher-order function (with a lambda argument) into a {@link
+     * RexNode}.
+     *
+     * <p>The result type is taken from the already resolved {@link CallExpression} rather than
+     * being re-derived from the operands: at the {@link RexNode} level a {@link
+     * org.apache.calcite.rex.RexLambda} carries only its body type (not the {@code FUNCTION} type
+     * that the operator's return-type inference expects during SQL validation).
+     */
+    private RexNode visitHigherOrderFunction(CallExpression call, SqlOperator operator) {
+        final List<RexNode> operands =
+                call.getChildren().stream()
+                        .map(child -> child.accept(this))
+                        .collect(Collectors.toList());
+        final RelDataType returnType =
+                typeFactory.createFieldTypeFromLogicalType(
+                        fromDataTypeToLogicalType(call.getOutputDataType()));
+        final RexCall rexCall =
+                (RexCall) relBuilder.getRexBuilder().makeCall(returnType, operator, operands);
+        // A lambda body may close over outer columns. Lift those captures out of the (closed)
+        // lambda into additional lambda parameters and trailing call operands so that column
+        // trimming keeps them; the runtime binds the parameters to the operand values.
+        return HigherOrderFunctionUtil.liftCaptures(rexCall, relBuilder.getRexBuilder());
+    }
+
+    /**
+     * Converts a resolved {@link LambdaExpression} into a {@link org.apache.calcite.rex.RexLambda}.
+     * Each parameter becomes a {@link RexLambdaRef} (indexed in declaration order) that the body
+     * can reference; the {@code FUNCTION} type is recomputed by {@link RexBuilder#makeLambdaCall}
+     * from the parameter and body types.
+     */
+    private RexNode visitLambda(LambdaExpression lambda) {
+        final List<LocalReferenceExpression> parameters = lambda.getParameters();
+        // Give this lambda's parameters indices past those of any enclosing lambdas currently in
+        // scope, so a free reference to an enclosing parameter stays distinguishable from an own
+        // parameter on Calcite's positional RexLambdaRef index.
+        // HigherOrderFunctionUtil#liftCaptures
+        // lifts such references out of the (closed) lambda and renumbers the parameters to 0-based.
+        int base = 0;
+        for (RexLambdaRef enclosing : lambdaParamRefs.values()) {
+            base = Math.max(base, enclosing.getIndex() + 1);
+        }
+        final List<RexLambdaRef> refs = new ArrayList<>();
+        for (int i = 0; i < parameters.size(); i++) {
+            final LocalReferenceExpression parameter = parameters.get(i);
+            final RelDataType type =
+                    typeFactory.createFieldTypeFromLogicalType(
+                            fromDataTypeToLogicalType(parameter.getOutputDataType()));
+            refs.add(new RexLambdaRef(base + i, parameter.getName(), type));
+        }
+        // bind the parameters while converting the body, saving any shadowed bindings
+        final Map<String, RexLambdaRef> shadowed = new HashMap<>();
+        for (RexLambdaRef ref : refs) {
+            shadowed.put(ref.getName(), lambdaParamRefs.put(ref.getName(), ref));
+        }
+        try {
+            final RexNode body = lambda.getBody().accept(this);
+            return relBuilder.getRexBuilder().makeLambdaCall(body, refs);
+        } finally {
+            for (RexLambdaRef ref : refs) {
+                final RexLambdaRef previous = shadowed.get(ref.getName());
+                if (previous == null) {
+                    lambdaParamRefs.remove(ref.getName());
+                } else {
+                    lambdaParamRefs.put(ref.getName(), previous);
+                }
+            }
         }
     }
 

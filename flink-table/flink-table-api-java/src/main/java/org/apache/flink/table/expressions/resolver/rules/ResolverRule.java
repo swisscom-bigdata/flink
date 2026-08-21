@@ -86,6 +86,13 @@ public interface ResolverRule {
          */
         ExpressionResolver.PostResolverFactory postResolutionFactory();
 
+        /**
+         * Resolves the body of a lambda expression in a scope containing the given parameters (and
+         * without access to input columns).
+         */
+        ResolvedExpression resolveLambdaBody(
+                Expression body, List<LocalReferenceExpression> parameters);
+
         /** Access to available local references. */
         Optional<LocalReferenceExpression> getLocalReference(String alias);
 

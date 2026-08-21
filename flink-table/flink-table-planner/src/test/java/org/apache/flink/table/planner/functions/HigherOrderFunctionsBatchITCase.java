@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.functions;
 
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.Over;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.SqlParserException;
 import org.apache.flink.table.api.Table;
@@ -31,7 +32,10 @@ import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.ObjectPath;
+import org.apache.flink.table.expressions.Expression;
+import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
 import org.apache.flink.table.functions.ScalarFunction;
+import org.apache.flink.table.planner.factories.TestValuesTableFactory;
 import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
@@ -40,21 +44,27 @@ import org.apache.flink.util.ExceptionUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
+import static org.apache.flink.table.api.Expressions.$;
+import static org.apache.flink.table.api.Expressions.lit;
+import static org.apache.flink.table.api.Expressions.map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Batch execution coverage for the built-in array and map higher-order functions, plus the
- * cross-cutting SQL semantics that are asserted once rather than per runtime mode. The {@link
- * HigherOrderFunctionsITCase} suite runs the same built-ins in streaming mode; the duplication
- * across modes is deliberate, since batch/stream equivalence is a requirement of FLINK-31207.
+ * cross-cutting SQL/Table API semantics that are asserted once rather than per runtime mode. The
+ * {@link HigherOrderFunctionsITCase} suite runs the same built-ins in streaming mode; the
+ * duplication across modes and across the SQL / Table API surfaces is deliberate, since
+ * batch/stream equivalence and surface parity are requirements of FLINK-31207.
  *
  * <p>The class name states the runtime mode, but the file also hosts the areas below. They live
  * here because they share the fixtures at the bottom of the file ({@code higherOrderFunctionInput},
@@ -62,13 +72,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * friends). Grep for the method prefix to find an area:
  *
  * <ul>
- *   <li>{@code testArrayHigherOrderFunctions*}, {@code testMapHigherOrderFunctions*} — the eight
- *       built-ins end to end, in batch.
+ *   <li>{@code testArrayHigherOrderFunctions*}, {@code testMapHigherOrderFunctions*}, {@code
+ *       testHigherOrderFunctionsTableApi} — the eight built-ins end to end, in batch, on both
+ *       surfaces.
  *   <li>{@code testMapZipWith*}, {@code testMapTransformKeys*} — logical map-key equality: type
  *       coercion between key types, key nullability merging, and duplicate/null key rejection.
- *   <li>{@code testInvalidArguments*}, {@code testLambdaOutsideOfHigherOrderFunctionIsRejected},
- *       {@code testDuplicateLambdaParameterNamesAreRejected} — validation and signature error
- *       messages.
+ *   <li>{@code testInvalidArguments*}, {@code testFilterPredicateAndReducerContract*}, {@code
+ *       testLambdaOutsideOfHigherOrderFunctionIsRejected}, {@code
+ *       testDuplicateLambdaParameterNamesAreRejected} — validation and signature error messages.
  *   <li>{@code testArrayFilterOverEnclosingLambdaParameter}, {@code
  *       testCollectionConstructorsOverLambdaParameter}, {@code
  *       testMutableLambdaResultsAreNotAliased} — lambda parameter scoping and the no-aliasing rule
@@ -77,7 +88,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *       column, in a resolved schema, or across a catalog round-trip.
  *   <li>{@code testAggregate*}, {@code testCaptureOfGroupKeyInLambdaBody} — aggregates in and
  *       around lambda bodies, and capture of a group key.
- *   <li>{@code testOverWindowInLambdaBody} — {@code OVER} windows in a lambda body.
+ *   <li>{@code testOverWindowInLambdaBody*} — {@code OVER} windows in a lambda body.
  *   <li>{@code testSubQueryInLambdaBody}, {@code testOuterColumnCaptureFromLambdaInScalarSubquery}
  *       — sub-queries in a lambda body and capture across a sub-query boundary.
  *   <li>{@code testViewOver*} — the view / SQL-expansion round-trip.
@@ -89,8 +100,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Only the first bullet duplicates {@link HigherOrderFunctionsITCase}; every other area is
  * mode-independent and has no streaming counterpart. Should {@link BuiltInFunctionTestBase} ever be
- * parameterized over the runtime mode, those methods are what it would absorb — the rest of this
- * file would stay as it is.
+ * parameterized over the runtime mode, those three methods are what it would absorb — the rest of
+ * this file would stay as it is.
  */
 class HigherOrderFunctionsBatchITCase {
 
@@ -182,6 +193,49 @@ class HigherOrderFunctionsBatchITCase {
     }
 
     @Test
+    void testHigherOrderFunctionsTableApi() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+        m.put("a", 1);
+        m.put("b", 2);
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("a1", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD("a2", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "m", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))),
+                        Row.of(new Integer[] {1, 2, 3}, new Integer[] {10, 20}, m));
+
+        final Table result =
+                input.select(
+                        org.apache.flink.table.api.Expressions.$("a1")
+                                .arrayZipWith(
+                                        org.apache.flink.table.api.Expressions.$("a2"),
+                                        (x, y) -> x.plus(y.ifNull(0))),
+                        org.apache.flink.table.api.Expressions.$("m")
+                                .mapFilter((k, v) -> v.isGreater(1)),
+                        org.apache.flink.table.api.Expressions.$("m")
+                                .mapTransformValues((k, v) -> v.times(10)));
+
+        try (final CloseableIterator<Row> iterator = result.execute().collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+            assertThat(row.getField(0)).isEqualTo(new Integer[] {11, 22, 3});
+
+            final java.util.Map<String, Integer> filtered = new java.util.HashMap<>();
+            filtered.put("b", 2);
+            assertThat(row.getField(1)).isEqualTo(filtered);
+
+            final java.util.Map<String, Integer> values = new java.util.HashMap<>();
+            values.put("a", 10);
+            values.put("b", 20);
+            assertThat(row.getField(2)).isEqualTo(values);
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    @Test
     void testMapHigherOrderFunctionsWithCaptureAndNullMap() throws Exception {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
         final java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
@@ -242,28 +296,64 @@ class HigherOrderFunctionsBatchITCase {
     @Test
     void testMapZipWithCoercesCompatibleKeyTypes() throws Exception {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
-        tEnv.createTemporaryView("t", mapsWithIntAndBigintKeys(tEnv));
+        final Table input = mapsWithIntAndBigintKeys(tEnv);
+        tEnv.createTemporaryView("t", input);
 
         // A MAP<INT,..> and a MAP<BIGINT,..> have compatible but not identical key types. Both maps
         // are cast to the common key type, so key 1 of the first map and key 1 of the second map
         // are the same key of the merged map (rather than being rejected or, worse, counted twice).
-        final Table result =
+        final Table sqlResult =
                 tEnv.sqlQuery(
                         "SELECT MAP_ZIP_WITH(mi, ml,"
                                 + " (k, v1, v2) -> COALESCE(v1, 0) + COALESCE(v2, 0))"
                                 + " FROM t");
+        final Table tableApiResult =
+                input.select(
+                        $("mi").mapZipWith(
+                                        $("ml"),
+                                        (k, v1, v2) -> v1.ifNull(lit(0)).plus(v2.ifNull(lit(0)))));
 
         final java.util.Map<Long, Integer> zipped = new java.util.HashMap<>();
         zipped.put(1L, 11);
         zipped.put(2L, 2);
         zipped.put(3L, 30);
-        assertThat(result.getResolvedSchema().getColumnDataTypes().get(0))
-                .isEqualTo(DataTypes.MAP(DataTypes.BIGINT(), DataTypes.INT().notNull()).nullable());
-        try (final CloseableIterator<Row> iterator = result.execute().collect()) {
-            assertThat(iterator).hasNext();
-            assertThat(iterator.next().getField(0)).isEqualTo(zipped);
-            assertThat(iterator).isExhausted();
+        for (final Table result : Arrays.asList(sqlResult, tableApiResult)) {
+            assertThat(result.getResolvedSchema().getColumnDataTypes().get(0))
+                    .isEqualTo(
+                            DataTypes.MAP(DataTypes.BIGINT(), DataTypes.INT().notNull())
+                                    .nullable());
+            try (final CloseableIterator<Row> iterator = result.execute().collect()) {
+                assertThat(iterator).hasNext();
+                assertThat(iterator.next().getField(0)).isEqualTo(zipped);
+                assertThat(iterator).isExhausted();
+            }
         }
+    }
+
+    @Test
+    void testMapZipWithRejectsKeyTypesWithoutCommonType() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final java.util.Map<Integer, Integer> mInt = new java.util.LinkedHashMap<>();
+        mInt.put(1, 1);
+        final java.util.Map<String, Integer> mStr = new java.util.LinkedHashMap<>();
+        mStr.put("1", 10);
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "mi", DataTypes.MAP(DataTypes.INT(), DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "ms", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))),
+                        Row.of(mInt, mStr));
+
+        // INT and STRING keys have no common type, so the maps cannot be merged. The Table API does
+        // not go through the planner's operand type checker, so the rule must be enforced by the
+        // input type strategy as well. Otherwise the mismatch would only surface at runtime.
+        assertThatThrownBy(
+                        () -> input.select($("mi").mapZipWith($("ms"), (k, v1, v2) -> v1.plus(v2))))
+                .isInstanceOf(ValidationException.class)
+                .hasStackTraceContaining(
+                        "The two maps of MAP_ZIP_WITH must have a common key type");
     }
 
     private static Table mapsWithIntAndBigintKeys(TableEnvironment tEnv) {
@@ -300,6 +390,39 @@ class HigherOrderFunctionsBatchITCase {
             assertThat(row.getField(0)).isEqualTo(zipped);
             assertThat(iterator).isExhausted();
         }
+    }
+
+    @Test
+    void testMapZipWithMergesKeyNullabilityLikeSql() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "m", DataTypes.MAP(DataTypes.INT(), DataTypes.INT()))),
+                        Row.of(Collections.singletonMap(1, 10)));
+        tEnv.createTemporaryView("t", input);
+
+        // `m` has nullable keys, the MAP[..] literal has INT NOT NULL keys. Both paths merge the
+        // two key types into the common one - nullable if either side is - so the result key type
+        // must not depend on whether the call was written in SQL or in the Table API.
+        final Table sqlResult =
+                tEnv.sqlQuery("SELECT MAP_ZIP_WITH(MAP[1, 10], m, (k, v1, v2) -> v1) FROM t");
+        final Table tableApiResult =
+                input.select(map(lit(1), lit(10)).mapZipWith($("m"), (k, v1, v2) -> v1));
+
+        assertThat(tableApiResult.getResolvedSchema().getColumnDataTypes())
+                .isEqualTo(sqlResult.getResolvedSchema().getColumnDataTypes());
+        assertThat(
+                        ((org.apache.flink.table.types.KeyValueDataType)
+                                        tableApiResult
+                                                .getResolvedSchema()
+                                                .getColumnDataTypes()
+                                                .get(0))
+                                .getKeyDataType()
+                                .getLogicalType()
+                                .isNullable())
+                .isTrue();
     }
 
     @Test
@@ -352,7 +475,9 @@ class HigherOrderFunctionsBatchITCase {
         // reported
         // by Calcite with its signature, exactly as for a hand-written operator; only the supported
         // form is now generated from the type inference rather than hand-written. When the lambda
-        // itself is rejected, the input type strategy reports it, which names the actual cause.
+        // itself is rejected, the input type strategy reports it, which names the actual cause and
+        // renders the same text on the SQL and the Table API surface (see
+        // HigherOrderFunctionValidationParityTest).
         assertInvalidCall(
                 tEnv,
                 "SELECT ARRAY_TRANSFORM(base, x -> x + 1) FROM t",
@@ -398,7 +523,7 @@ class HigherOrderFunctionsBatchITCase {
                         + "Supported form(s): ARRAY_ZIP_WITH(array1 ARRAY, array2 ARRAY, "
                         + "lambda FUNCTION(ARRAY1_ELEMENT_TYPE, ARRAY2_ELEMENT_TYPE)->ANY)");
         // the predicate of MAP_FILTER must be BOOLEAN, so a non-boolean lambda body is rejected
-        // with the function signature (the same rule as ARRAY_FILTER)
+        // with the function signature (the same rule as ARRAY_FILTER, on both SQL and Table API)
         assertInvalidCall(
                 tEnv,
                 "SELECT MAP_FILTER(m, (k, v) -> v + 1) FROM t",
@@ -457,6 +582,36 @@ class HigherOrderFunctionsBatchITCase {
                         + "<FUNCTION(ANY, ANY, ANY) -> ANY>)'. Supported form(s): "
                         + "MAP_ZIP_WITH(map1 MAP, map2 MAP, "
                         + "lambda FUNCTION(MAP_KEY_TYPE, MAP1_VALUE_TYPE, MAP2_VALUE_TYPE)->ANY)");
+    }
+
+    @Test
+    void testFilterPredicateAndReducerContractOnTableApi() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final Table input = higherOrderFunctionInput(tEnv);
+
+        // The Table API does not go through the planner's operand type checker, so the same rules
+        // as SQL must be enforced by the input type strategies. Otherwise a non-boolean filter
+        // predicate or an incompatible reducer body would only fail later during code generation.
+
+        // ARRAY_FILTER predicate must be BOOLEAN
+        assertThatThrownBy(() -> input.select($("a").arrayFilter(x -> x.plus(1))))
+                .isInstanceOf(ValidationException.class)
+                .hasStackTraceContaining("must return BOOLEAN");
+
+        // MAP_FILTER predicate must be BOOLEAN
+        assertThatThrownBy(() -> input.select($("m").mapFilter((k, v) -> v.plus(1))))
+                .isInstanceOf(ValidationException.class)
+                .hasStackTraceContaining("must return BOOLEAN");
+
+        // ARRAY_REDUCE reducer body must be assignable to the accumulator (initial value) type
+        assertThatThrownBy(
+                        () ->
+                                input.select(
+                                        $("a").arrayReduce(
+                                                        lit(0),
+                                                        (acc, x) -> acc.plus(x).times(lit(0.5)))))
+                .isInstanceOf(ValidationException.class)
+                .hasStackTraceContaining("must return a type assignable to the accumulator type");
     }
 
     @Test
@@ -595,11 +750,38 @@ class HigherOrderFunctionsBatchITCase {
     @Test
     void testLambdaOutsideOfHigherOrderFunctionIsRejected() {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
-        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+        final Table input = higherOrderFunctionInput(tEnv);
+        tEnv.createTemporaryView("t", input);
 
         // SQL rejects a lambda outside of a function call already at the parser
         assertThatThrownBy(() -> tEnv.sqlQuery("SELECT x -> x + 1 FROM t"))
                 .hasMessageContaining("SQL parse failed. Encountered \"->\"");
+
+        // the Table API has no such syntax restriction, so the resolver rejects it
+        assertThatThrownBy(
+                        () ->
+                                input.select(
+                                        new UnresolvedLambdaExpression(
+                                                Collections.singletonList("x"),
+                                                $("x").plus(lit(1)))))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Unexpected lambda expression: x -> plus(x, 1). A lambda expression is "
+                                + "only supported as an argument of a function that declares a "
+                                + "lambda argument at this position.");
+
+        // a lambda passed to a function that does not declare a lambda argument
+        assertThatThrownBy(
+                        () ->
+                                input.select(
+                                        $("base")
+                                                .plus(
+                                                        new UnresolvedLambdaExpression(
+                                                                Collections.singletonList("x"),
+                                                                $("x")))))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Function 'plus' does not accept a lambda expression at position 1.");
     }
 
     @Test
@@ -766,7 +948,7 @@ class HigherOrderFunctionsBatchITCase {
         tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
 
         // A lambda binds its parameters by name, so two parameters of the same name would leave
-        // the first one unreferenceable. Rejected rather than silently collapsed.
+        // the first one unreferenceable. Rejected on both surfaces rather than silently collapsed.
         assertInvalidCall(
                 tEnv,
                 "SELECT ARRAY_ZIP_WITH(a, a, (x, x) -> x) FROM t",
@@ -781,6 +963,13 @@ class HigherOrderFunctionsBatchITCase {
                 tEnv,
                 "SELECT ARRAY_TRANSFORM(a, x -> ARRAY_ZIP_WITH(a, a, (x, x) -> x)[1]) FROM t",
                 "Duplicate lambda parameter name 'x'.");
+
+        assertThatThrownBy(
+                        () -> new UnresolvedLambdaExpression(Arrays.asList("x", "y", "x"), $("x")))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "The parameters of a lambda expression must have unique names. "
+                                + "Found duplicates: [x]");
     }
 
     @Test
@@ -826,20 +1015,137 @@ class HigherOrderFunctionsBatchITCase {
     }
 
     @Test
+    void testAggregateOverOuterColumnInLambdaBodyTableApi() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final Table input = groupedHigherOrderFunctionInput(tEnv);
+
+        // The Table API reaches the same result by a different route: the aggregate is hoisted out
+        // of the lambda body into the enclosing aggregation before resolution, so the body is left
+        // capturing an ordinary column of the aggregation's output.
+        assertThat(
+                        collectSingle(
+                                input.groupBy($("a"))
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                x -> x.plus($("base").sum())))))
+                .isEqualTo(new Integer[] {31, 32, 33});
+        // the group key order must not matter here either
+        assertThat(
+                        collectSingle(
+                                input.groupBy($("g"), $("a"))
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                x -> x.plus($("base").sum())))))
+                .isEqualTo(new Integer[] {31, 32, 33});
+        // an aggregate and an ordinary column capture in the same body
+        assertThat(
+                        collectSingle(
+                                input.groupBy($("a"), $("g"))
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                x ->
+                                                                        x.plus($("base").sum())
+                                                                                .plus(
+                                                                                        $("g").charLength())))))
+                .isEqualTo(new Integer[] {34, 35, 36});
+        // the same aggregate used inside and outside the lambda is extracted once
+        assertThat(
+                        collectSingle(
+                                input.groupBy($("a"))
+                                        .select(
+                                                $("a").arrayTransform(x -> x.plus($("base").sum())),
+                                                $("base").sum())))
+                .isEqualTo(new Integer[] {31, 32, 33});
+        // inside a nested lambda, which also captures the enclosing lambda's parameter
+        assertThat(
+                        collectSingle(
+                                input.groupBy($("a"))
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                e ->
+                                                                        $("a").arrayReduce(
+                                                                                        lit(0),
+                                                                                        (acc, x) ->
+                                                                                                acc.plus(
+                                                                                                                x)
+                                                                                                        .plus(
+                                                                                                                e)
+                                                                                                        .plus(
+                                                                                                                $("base")
+                                                                                                                        .sum()))))))
+                .isEqualTo(new Integer[] {99, 102, 105});
+    }
+
+    @Test
     void testAggregateInLambdaBodyWithoutGroupingIsRejected() {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
-        tEnv.createTemporaryView("t", groupedHigherOrderFunctionInput(tEnv));
+        final Table input = groupedHigherOrderFunctionInput(tEnv);
+        tEnv.createTemporaryView("t", input);
 
         // Hoisting the aggregate out of the lambda body does not exempt the column the body is
         // applied to from the grouping rules: without a GROUP BY the aggregate is global, so `a` is
         // not available to the projection. A lambda changes nothing here -- the same query without
-        // one is rejected identically.
+        // one is rejected identically, on both surfaces.
         assertInvalidCall(
                 tEnv,
                 "SELECT ARRAY_TRANSFORM(a, x -> x + SUM(base)) FROM t",
                 "Expression 'a' is not being grouped");
         assertInvalidCall(
                 tEnv, "SELECT a, SUM(base) FROM t", "Expression 'a' is not being grouped");
+
+        // The Table API reports its usual error for a non-grouped column alongside a global
+        // aggregate. The wording is not pinned -- only that the lambda form fails the same way as
+        // the plain one, which is what this test is about.
+        final String withLambda =
+                messageOf(() -> input.select($("a").arrayTransform(x -> x.plus($("base").sum()))));
+        final String withoutLambda = messageOf(() -> input.select($("a"), $("base").sum()));
+        assertThat(withLambda).isEqualTo(withoutLambda);
+    }
+
+    @Test
+    void testAggregateOverLambdaParameterIsRejectedInTableApi() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final Table input = groupedHigherOrderFunctionInput(tEnv);
+
+        // The message does not name the parameter: a Table API lambda parameter carries a generated
+        // name that would mean nothing to the reader.
+        assertThatThrownBy(() -> input.select($("a").arrayTransform(x -> x.sum())).execute())
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Aggregate functions over a lambda parameter are not supported in the body "
+                                + "of a lambda expression");
+        assertThatThrownBy(
+                        () ->
+                                input.groupBy($("a"))
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                x ->
+                                                                        x.plus(
+                                                                                x.plus($("base"))
+                                                                                        .sum())))
+                                        .execute())
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Aggregate functions over a lambda parameter are not supported");
+
+        // but a parameter of a lambda nested inside the aggregate is bound within it
+        assertThat(
+                        collectSingle(
+                                input.groupBy($("a"))
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                x ->
+                                                                        x.plus(
+                                                                                $("a").arrayReduce(
+                                                                                                lit(
+                                                                                                        0),
+                                                                                                (acc,
+                                                                                                        y) ->
+                                                                                                        acc
+                                                                                                                .plus(
+                                                                                                                        y))
+                                                                                        .sum())))))
+                .isEqualTo(new Integer[] {13, 14, 15});
     }
 
     @Test
@@ -973,6 +1279,57 @@ class HigherOrderFunctionsBatchITCase {
                 "SELECT ARRAY_TRANSFORM(a, x -> x + SUM(base) OVER (PARTITION BY x)) FROM t",
                 "OVER windows over a lambda parameter are not supported in the body of a lambda "
                         + "expression. 'x' is a lambda parameter");
+    }
+
+    /**
+     * The Table API counterpart of {@link #testOverWindowInLambdaBody()}. It runs in streaming mode
+     * -- unlike every other test here -- because a Table API over window must be ordered by a time
+     * attribute, which a batch table does not have: the batch {@code OverAggregateITCase} for the
+     * Table API is {@code @Disabled} for exactly that reason ("OverWindow on Batch should support
+     * to order by non-time attribute"). That restriction is pre-existing and unrelated to lambdas,
+     * so the only way to cover an over window in a lambda body over this surface is a rowtime
+     * table.
+     */
+    @Test
+    void testOverWindowInLambdaBodyTableApi() throws Exception {
+        final TableEnvironment tEnv =
+                TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+        final String dataId =
+                TestValuesTableFactory.registerData(
+                        Arrays.asList(
+                                Row.of(
+                                        new Integer[] {1, 2, 3},
+                                        10,
+                                        LocalDateTime.parse("2024-01-01T00:00:00")),
+                                Row.of(
+                                        new Integer[] {1, 2, 3},
+                                        20,
+                                        LocalDateTime.parse("2024-01-01T00:00:01"))));
+        tEnv.executeSql(
+                "CREATE TABLE t (\n"
+                        + "  a ARRAY<INT>,\n"
+                        + "  base INT,\n"
+                        + "  ts TIMESTAMP(3),\n"
+                        + "  WATERMARK FOR ts AS ts\n"
+                        + ") WITH (\n"
+                        + "  'connector' = 'values',\n"
+                        + "  'bounded' = 'false',\n"
+                        + "  'data-id' = '"
+                        + dataId
+                        + "'\n"
+                        + ")");
+
+        // the window is lifted out of the lambda and evaluated below it, exactly as for the SQL
+        // form. Ordering by the rowtime with the default unbounded-preceding range makes the lifted
+        // value a running sum, so the two rows see different values (10, then 10 + 20) -- a
+        // constant-folded or over-hoisted window could not produce both.
+        final Expression windowedSum = $("base").sum().over($("w"));
+        assertThat(
+                        collectColumn(
+                                tEnv.from("t")
+                                        .window(Over.orderBy($("ts")).as("w"))
+                                        .select($("a").arrayTransform(x -> x.plus(windowedSum)))))
+                .containsExactlyInAnyOrder(new Integer[] {11, 12, 13}, new Integer[] {31, 32, 33});
     }
 
     @Test
@@ -1472,6 +1829,14 @@ class HigherOrderFunctionsBatchITCase {
             assertThat(iterator).isExhausted();
             return value;
         }
+    }
+
+    /** The message of the {@link ValidationException} the given query is expected to fail with. */
+    private static String messageOf(Supplier<Table> query) {
+        return assertThatThrownBy(() -> query.get().execute())
+                .isInstanceOf(ValidationException.class)
+                .actual()
+                .getMessage();
     }
 
     private static Object collectSingle(Table table) throws Exception {
