@@ -29,6 +29,7 @@ import org.apache.flink.table.functions.ProcessTableFunction;
 import org.apache.flink.table.functions.TableSemantics;
 import org.apache.flink.table.functions.TableSemantics.SortDirection;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
@@ -47,6 +48,7 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -97,6 +99,8 @@ public class SystemTypeInference {
 
     public static TypeInference of(FunctionKind functionKind, TypeInference origin) {
         final TypeInference.Builder builder = TypeInference.newBuilder();
+
+        checkLambdaArgs(functionKind, origin);
 
         final List<StaticArgument> systemArgs =
                 deriveSystemArgs(
@@ -166,6 +170,89 @@ public class SystemTypeInference {
     }
 
     // --------------------------------------------------------------------------------------------
+
+    /**
+     * Lambda arguments are only supported for function kinds whose evaluation method is called
+     * synchronously with the lambda object, so that the object never outlives the invocation it is
+     * passed to.
+     */
+    private static final EnumSet<FunctionKind> LAMBDA_ARG_FUNCTION_KINDS =
+            EnumSet.of(FunctionKind.SCALAR, FunctionKind.TABLE, FunctionKind.PROCESS_TABLE);
+
+    /**
+     * Rejects a lambda argument for a function kind that cannot host one, before the call reaches
+     * planning where the unsupported lambda operand would surface as an internal error.
+     *
+     * <p>Implementing {@link LambdaInputTypeStrategy} is what declares a lambda argument, so the
+     * guard reads exactly what the SQL and the Table API binding paths read.
+     */
+    public static void checkLambdaArgs(
+            FunctionKind functionKind, InputTypeStrategy inputTypeStrategy) {
+        if (LAMBDA_ARG_FUNCTION_KINDS.contains(functionKind)) {
+            return;
+        }
+        if (!(inputTypeStrategy instanceof LambdaInputTypeStrategy)) {
+            return;
+        }
+        throw unsupportedFunctionKind(functionKind);
+    }
+
+    private static ValidationException unsupportedFunctionKind(FunctionKind functionKind) {
+        return new ValidationException(
+                String.format(
+                        "Lambda arguments are not supported for functions of kind '%s'. "
+                                + "Only scalar, table, and process table functions can declare a "
+                                + "lambda argument.",
+                        functionKind));
+    }
+
+    /**
+     * Like {@link #checkLambdaArgs(FunctionKind, InputTypeStrategy)}, but additionally validates a
+     * lambda argument declared in the static signature.
+     *
+     * <p>A {@link StaticArgument} of type {@code FUNCTION} fixes the position and the arity of a
+     * lambda argument of a process table function, which must declare a static signature. Its
+     * parameter types are derived per call and therefore still come from a {@link
+     * LambdaInputTypeStrategy}. Other function kinds declare lambda arguments through their input
+     * type strategy only.
+     */
+    public static void checkLambdaArgs(FunctionKind functionKind, TypeInference typeInference) {
+        final InputTypeStrategy inputTypeStrategy = typeInference.getInputTypeStrategy();
+        checkLambdaArgs(functionKind, inputTypeStrategy);
+        final List<StaticArgument> staticArgs = typeInference.getStaticArguments().orElse(null);
+        if (staticArgs == null) {
+            return;
+        }
+        for (StaticArgument arg : staticArgs) {
+            final LogicalType type = arg.getDataType().map(DataType::getLogicalType).orElse(null);
+            if (type == null || !type.is(LogicalTypeRoot.FUNCTION)) {
+                continue;
+            }
+            if (!LAMBDA_ARG_FUNCTION_KINDS.contains(functionKind)) {
+                throw unsupportedFunctionKind(functionKind);
+            }
+            if (functionKind != FunctionKind.PROCESS_TABLE) {
+                throw new ValidationException(
+                        String.format(
+                                "Invalid data type '%s' for argument '%s'. Lambda arguments in a "
+                                        + "static signature are only supported for process table "
+                                        + "functions. Declare them with a LambdaInputTypeStrategy "
+                                        + "in getTypeInference() instead.",
+                                type, arg.getName()));
+            }
+            if (!(inputTypeStrategy instanceof LambdaInputTypeStrategy)) {
+                throw new ValidationException(
+                        String.format(
+                                "Lambda argument '%s' requires an input type strategy that "
+                                        + "implements LambdaInputTypeStrategy, which derives the "
+                                        + "types of the lambda parameters. They cannot be "
+                                        + "extracted from the eval() method, so override "
+                                        + "getTypeInference() to declare the static arguments "
+                                        + "together with such a strategy.",
+                                arg.getName()));
+            }
+        }
+    }
 
     private static void checkScalarArgsOnly(List<StaticArgument> defaultArgs) {
         defaultArgs.forEach(
@@ -329,6 +416,10 @@ public class SystemTypeInference {
             boolean disableSystemArgs) {
         if (functionKind != FunctionKind.PROCESS_TABLE) {
             return inputStrategy;
+        }
+        if (inputStrategy instanceof LambdaInputTypeStrategy) {
+            return new LambdaSystemInputStrategy(
+                    staticArgs, (LambdaInputTypeStrategy) inputStrategy, disableSystemArgs);
         }
         return new SystemInputStrategy(staticArgs, inputStrategy, disableSystemArgs);
     }
@@ -638,9 +729,53 @@ public class SystemTypeInference {
         }
     }
 
+    /**
+     * A {@link SystemInputStrategy} that keeps declaring the lambda arguments of its origin. The
+     * system arguments are appended, so the positions of the declared arguments are unchanged.
+     */
+    private static class LambdaSystemInputStrategy extends SystemInputStrategy
+            implements LambdaInputTypeStrategy {
+
+        private final LambdaInputTypeStrategy lambdaOrigin;
+
+        private LambdaSystemInputStrategy(
+                List<StaticArgument> staticArgs,
+                LambdaInputTypeStrategy origin,
+                boolean disableSystemArgs) {
+            super(staticArgs, origin, disableSystemArgs);
+            this.lambdaOrigin = origin;
+        }
+
+        @Override
+        public Optional<List<DataType>> getExpectedLambdaParameterTypes(
+                CallContext callContext, int argumentPos) {
+            final Optional<List<DataType>> parameterTypes =
+                    lambdaOrigin.getExpectedLambdaParameterTypes(callContext, argumentPos);
+            if (!parameterTypes.isPresent()
+                    || staticArgs == null
+                    || argumentPos >= staticArgs.size()) {
+                return parameterTypes;
+            }
+            final StaticArgument staticArg = staticArgs.get(argumentPos);
+            final LogicalType type =
+                    staticArg.getDataType().map(DataType::getLogicalType).orElse(null);
+            if (type instanceof FunctionType
+                    && ((FunctionType) type).getParameterCount() != parameterTypes.get().size()) {
+                throw new ValidationException(
+                        String.format(
+                                "Lambda argument '%s' declares %d parameter(s) in the static "
+                                        + "signature, but its input type strategy derives %d.",
+                                staticArg.getName(),
+                                ((FunctionType) type).getParameterCount(),
+                                parameterTypes.get().size()));
+            }
+            return parameterTypes;
+        }
+    }
+
     private static class SystemInputStrategy implements InputTypeStrategy {
 
-        private final List<StaticArgument> staticArgs;
+        protected final List<StaticArgument> staticArgs;
         private final InputTypeStrategy origin;
         private final boolean disableSystemArgs;
 

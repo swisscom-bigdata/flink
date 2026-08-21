@@ -570,6 +570,72 @@ class MyPTF extends ProcessTableFunction<String> {
 {{< /tab >}}
 {{< /tabs >}}
 
+#### Lambda Arguments
+
+A PTF can take a lambda expression as a scalar argument, which lets the caller decide how a value is
+computed, for example:
+
+```sql
+SELECT * FROM ScoreTransform(input_table => TABLE t, f => x -> x * 10);
+```
+
+A lambda argument cannot be declared through the `eval()` method alone: a parameter such as
+`Function<Integer, Integer>` fixes the position and the number of lambda parameters, but not their
+types, which depend on the call. Instead, the PTF overrides `getTypeInference()`:
+
+* The static signature lists the lambda as a scalar argument of type `DataTypes.FUNCTION(n)`, where
+  `n` is the number of lambda parameters.
+* The input type strategy is a `LambdaInputTypeStrategy`, which derives the lambda parameter types
+  from the other arguments. Since the static signature already declares and validates every
+  argument, the default methods of the interface suffice, and the strategy can be written as a
+  lambda.
+
+See [Lambda Arguments]({{< ref "docs/dev/table/functions/udfs" >}}#lambda-arguments) for the general
+mechanism, the function object that `eval()` receives, and the rules that apply to it.
+
+{{< tabs "lambda-argument-ptf" >}}
+{{< tab "Java" >}}
+```java
+// Function that applies the lambda "f" to the "score" column of every row
+class ScoreTransform extends ProcessTableFunction<Integer> {
+  public void eval(Row input, Function<Integer, Integer> f) {
+    collect(f.apply(input.getFieldAs("score")));
+  }
+
+  @Override
+  public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+    // the lambda "f" at position 1 has a single parameter of the type of the "score" column
+    final LambdaInputTypeStrategy scoreParameter =
+      (callContext, argumentPos) -> {
+        if (argumentPos != 1) {
+          return Optional.empty();
+        }
+        final DataType tableType = callContext.getArgumentDataTypes().get(0);
+        final int score = DataType.getFieldNames(tableType).indexOf("score");
+        return Optional.of(List.of(DataType.getFieldDataTypes(tableType).get(score)));
+      };
+    return TypeInference.newBuilder()
+      .staticArguments(
+        StaticArgument.table(
+          "input_table", Row.class, false, EnumSet.of(StaticArgumentTrait.ROW_SEMANTIC_TABLE)),
+        StaticArgument.scalar("f", DataTypes.FUNCTION(1), false))
+      .inputTypeStrategy(scoreParameter)
+      .outputTypeStrategy(TypeStrategies.explicit(DataTypes.INT()))
+      .build();
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+The following restrictions apply to a lambda argument of a PTF:
+
+* It must not be optional.
+* It must be self-contained: the body may only reference its own parameters, literals, and the
+  parameters of lambdas nested in it, but no sub-query or other value of the enclosing query.
+* The function object is only valid during the `eval()` call that receives it. It must not be stored
+  in a field or in state, and thus cannot be applied in `onTimer()`.
+
 ### Context
 
 A `Context` can be added as a first argument to the `eval()` method for additional

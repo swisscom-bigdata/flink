@@ -18,6 +18,11 @@
 
 package org.apache.flink.table.planner.functions.utils;
 
+import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.functions.FunctionKind;
+import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
+import org.apache.flink.table.planner.utils.ShortcutUtils;
+
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
@@ -191,6 +196,9 @@ public final class HigherOrderFunctionUtil {
             if (lifted == null) {
                 continue;
             }
+            if (!lifted.captures.isEmpty()) {
+                checkCapturesSupported(call);
+            }
             newOperands.set(pos, lifted.lambda);
             trailingCaptures.addAll(lifted.captures);
             changed = true;
@@ -204,6 +212,24 @@ public final class HigherOrderFunctionUtil {
                 (RexCall) rexBuilder.makeCall(call.getType(), call.getOperator(), newOperands);
         checkClosed(lifted);
         return lifted;
+    }
+
+    /**
+     * A process table function locates its system arguments ({@code on_time}, {@code uid}) from the
+     * end of its operand list, which leaves no room for trailing capture operands. Its lambda
+     * arguments are therefore self-contained.
+     */
+    private static void checkCapturesSupported(RexCall call) {
+        final BridgingSqlFunction function = ShortcutUtils.unwrapBridgingSqlFunction(call);
+        if (function == null || function.getDefinition().getKind() != FunctionKind.PROCESS_TABLE) {
+            return;
+        }
+        throw new ValidationException(
+                String.format(
+                        "A lambda argument of process table function '%s' may only reference its "
+                                + "own parameters, literals, and the parameters of lambdas nested "
+                                + "in its body.",
+                        function.getName()));
     }
 
     /**

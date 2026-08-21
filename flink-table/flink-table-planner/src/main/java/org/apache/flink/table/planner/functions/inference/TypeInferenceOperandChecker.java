@@ -38,6 +38,7 @@ import org.apache.flink.table.types.inference.StaticArgumentTrait;
 import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.inference.TypeInferenceUtil;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RawType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
 import org.apache.flink.table.types.utils.TypeConversions;
@@ -223,6 +224,11 @@ public final class TypeInferenceOperandChecker
         final LogicalType type = arg.getDataType().map(DataType::getLogicalType).orElse(null);
         if (type == null) {
             // Untyped table arguments
+            return typeFactory.createSqlType(SqlTypeName.ANY);
+        }
+        if (type.is(LogicalTypeRoot.FUNCTION)) {
+            // A lambda argument of a process table function. Calcite cannot cast-check a lambda
+            // against a parameter type during routine lookup; the type inference validates it.
             return typeFactory.createSqlType(SqlTypeName.ANY);
         }
         if (arg.is(StaticArgumentTrait.TABLE)) {
