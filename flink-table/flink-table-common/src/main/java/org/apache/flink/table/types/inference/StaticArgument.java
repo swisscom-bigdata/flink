@@ -49,6 +49,10 @@ import java.util.stream.Stream;
  *
  * <p>Static arguments can take tables, models, or scalar values. Each argument takes a set of
  * {@link StaticArgumentTrait} that enable basic validation by the framework.
+ *
+ * <p>Lambda arguments of higher-order functions are not part of a static signature. They are
+ * declared with a {@link LambdaInputTypeStrategy}, because their parameter types are derived from
+ * the sibling arguments of a call.
  */
 @PublicEvolving
 public class StaticArgument {
@@ -89,6 +93,7 @@ public class StaticArgument {
         checkOptionalType();
         checkTableType();
         checkModelType();
+        checkLambdaType();
     }
 
     /**
@@ -402,6 +407,18 @@ public class StaticArgument {
             return;
         }
         checkModelNotOptional();
+    }
+
+    private void checkLambdaType() {
+        if (dataType == null || !dataType.getLogicalType().is(LogicalTypeRoot.FUNCTION)) {
+            return;
+        }
+        throw new ValidationException(
+                String.format(
+                        "Invalid data type '%s' for argument '%s'. "
+                                + "Lambda arguments are not supported in a static signature. "
+                                + "Declare them with a LambdaInputTypeStrategy instead.",
+                        dataType.getLogicalType(), name));
     }
 
     private void checkTableNotOptional() {

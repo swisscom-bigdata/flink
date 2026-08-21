@@ -1,0 +1,164 @@
+{
+  "flinkVersion" : "2.4",
+  "nodes" : [ {
+    "id" : 31,
+    "type" : "batch-exec-table-source-scan_1",
+    "scanTableSource" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`source_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "v",
+              "dataType" : "INT"
+            }, {
+              "name" : "b1",
+              "dataType" : "INT"
+            }, {
+              "name" : "b2",
+              "dataType" : "INT"
+            } ]
+          }
+        }
+      }
+    },
+    "outputType" : "ROW<`v` INT, `b1` INT, `b2` INT>",
+    "description" : "TableSourceScan(table=[[default_catalog, default_database, source_t]], fields=[v, b1, b2])",
+    "dynamicFilteringDataListenerID" : "9b3f94f3-2203-4d02-b90c-2dbe67059b81"
+  }, {
+    "id" : 32,
+    "type" : "batch-exec-calc_1",
+    "projection" : [ {
+      "kind" : "CALL",
+      "systemName" : "my_two_lambdas",
+      "operands" : [ {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 0,
+        "type" : "INT"
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "x",
+          "index" : 0,
+          "type" : "INT"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "cap$1",
+          "index" : 1000000,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$+$1",
+          "operands" : [ {
+            "kind" : "LAMBDA_REF",
+            "name" : "x",
+            "index" : 0,
+            "type" : "INT"
+          }, {
+            "kind" : "LAMBDA_REF",
+            "name" : "cap$1",
+            "index" : 1000000,
+            "type" : "INT"
+          } ],
+          "type" : "INT"
+        }
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "x",
+          "index" : 0,
+          "type" : "INT"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "cap$2",
+          "index" : 1000000,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$*$1",
+          "operands" : [ {
+            "kind" : "LAMBDA_REF",
+            "name" : "x",
+            "index" : 0,
+            "type" : "INT"
+          }, {
+            "kind" : "LAMBDA_REF",
+            "name" : "cap$2",
+            "index" : 1000000,
+            "type" : "INT"
+          } ],
+          "type" : "INT"
+        }
+      }, {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 1,
+        "type" : "INT"
+      }, {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 2,
+        "type" : "INT"
+      } ],
+      "type" : "INT"
+    } ],
+    "condition" : null,
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` INT>",
+    "description" : "Calc(select=[my_two_lambdas(v, (x, cap$1) -> (x + cap$1), (x, cap$2) -> (x * cap$2), b1, b2) AS EXPR$0])"
+  }, {
+    "id" : 33,
+    "type" : "batch-exec-sink_1",
+    "configuration" : {
+      "table.exec.sink.not-null-enforcer" : "ERROR",
+      "table.exec.sink.type-length-enforcer" : "IGNORE"
+    },
+    "dynamicTableSink" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`sink_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "a",
+              "dataType" : "INT"
+            } ]
+          }
+        }
+      }
+    },
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "BLOCKING",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` INT>",
+    "description" : "Sink(table=[default_catalog.default_database.sink_t], fields=[EXPR$0])"
+  } ],
+  "edges" : [ {
+    "source" : 31,
+    "target" : 32,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  }, {
+    "source" : 32,
+    "target" : 33,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  } ]
+}

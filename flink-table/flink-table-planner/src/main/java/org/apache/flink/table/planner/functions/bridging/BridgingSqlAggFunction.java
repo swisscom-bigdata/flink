@@ -30,6 +30,7 @@ import org.apache.flink.table.planner.calcite.FlinkContext;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.inference.SystemTypeInference;
 import org.apache.flink.table.types.inference.TypeInference;
 
 import org.apache.calcite.plan.RelOptCluster;
@@ -109,6 +110,8 @@ public final class BridgingSqlAggFunction extends SqlAggFunction {
                 functionKind == FunctionKind.AGGREGATE
                         || functionKind == FunctionKind.TABLE_AGGREGATE,
                 "Aggregating function kind expected.");
+
+        SystemTypeInference.checkLambdaArgs(functionKind, typeInference.getInputTypeStrategy());
 
         return new BridgingSqlAggFunction(
                 dataTypeFactory, typeFactory, kind, resolvedFunction, typeInference);

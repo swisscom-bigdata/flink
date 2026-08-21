@@ -140,6 +140,9 @@ table.select(
 {{< /tab >}}
 {{< /tabs >}}
 
+自定义函数同样可以声明 lambda 参数，参见
+[自定义函数]({{< ref "docs/dev/table/functions/udfs" >}}#lambda-参数)。
+
 {{< sql_functions_zh "higherorder" >}}
 
 ### JSON 函数

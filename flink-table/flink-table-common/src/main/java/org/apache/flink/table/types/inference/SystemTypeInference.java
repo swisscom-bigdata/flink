@@ -47,6 +47,7 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -97,6 +98,8 @@ public class SystemTypeInference {
 
     public static TypeInference of(FunctionKind functionKind, TypeInference origin) {
         final TypeInference.Builder builder = TypeInference.newBuilder();
+
+        checkLambdaArgs(functionKind, origin.getInputTypeStrategy());
 
         final List<StaticArgument> systemArgs =
                 deriveSystemArgs(
@@ -155,6 +158,35 @@ public class SystemTypeInference {
     }
 
     // --------------------------------------------------------------------------------------------
+
+    /**
+     * Lambda arguments are only supported for function kinds whose call is compiled into a scalar
+     * expression that can host the lambda body.
+     */
+    private static final EnumSet<FunctionKind> LAMBDA_ARG_FUNCTION_KINDS =
+            EnumSet.of(FunctionKind.SCALAR, FunctionKind.TABLE);
+
+    /**
+     * Rejects a lambda argument for a function kind that cannot host one, before the call reaches
+     * planning where the unsupported lambda operand would surface as an internal error.
+     *
+     * <p>Implementing {@link LambdaInputTypeStrategy} is what declares a lambda argument, so the
+     * guard reads exactly what the SQL and the Table API binding paths read.
+     */
+    public static void checkLambdaArgs(
+            FunctionKind functionKind, InputTypeStrategy inputTypeStrategy) {
+        if (LAMBDA_ARG_FUNCTION_KINDS.contains(functionKind)) {
+            return;
+        }
+        if (!(inputTypeStrategy instanceof LambdaInputTypeStrategy)) {
+            return;
+        }
+        throw new ValidationException(
+                String.format(
+                        "Lambda arguments are not supported for functions of kind '%s'. "
+                                + "Only scalar and table functions can declare a lambda argument.",
+                        functionKind));
+    }
 
     private static void checkScalarArgsOnly(List<StaticArgument> defaultArgs) {
         defaultArgs.forEach(

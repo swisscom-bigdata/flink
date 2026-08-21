@@ -18,6 +18,10 @@
 
 package org.apache.flink.table.planner.plan.nodes.exec.common;
 
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.catalog.DataTypeFactory;
+import org.apache.flink.table.functions.ScalarFunction;
+import org.apache.flink.table.planner.functions.utils.TestLambdaStrategies;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecCalc;
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.JavaFunc0;
@@ -28,15 +32,20 @@ import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctio
 import org.apache.flink.table.test.program.SinkTestStep;
 import org.apache.flink.table.test.program.SourceTestStep;
 import org.apache.flink.table.test.program.TableTestProgram;
+import org.apache.flink.table.types.inference.TypeInference;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.variant.Variant;
 import org.apache.flink.types.variant.VariantBuilder;
+
+import javax.annotation.Nullable;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 /** {@link TableTestProgram}s for testing {@link StreamExecCalc} and {@link BatchExecCalc}. */
 public class CalcTestPrograms {
@@ -134,6 +143,29 @@ public class CalcTestPrograms {
                                     + "SELECT ARRAY_REDUCE(a, 0, (acc, x) -> acc + x) FROM source_t")
                     .build();
 
+    public static final TableTestProgram CALC_UDF_ARRAY_TRANSFORM =
+            TableTestProgram.of(
+                            "calc-udf-array-transform",
+                            "validates calc node with a user-defined higher-order function that takes a lambda argument")
+                    .setupTemporarySystemFunction("my_array_transform", UdfArrayTransform.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .producedBeforeRestore(Row.of((Object) new Integer[] {1, 2, 3}))
+                                    .producedAfterRestore(Row.of((Object) new Integer[] {4, 5}))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a ARRAY<INT>")
+                                    .consumedBeforeRestore(
+                                            Row.of((Object) new Integer[] {11, 12, 13}))
+                                    .consumedAfterRestore(Row.of((Object) new Integer[] {14, 15}))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t "
+                                    + "SELECT my_array_transform(a, x -> x + 10) FROM source_t")
+                    .build();
+
     public static final TableTestProgram CALC_ARRAY_TRANSFORM_CAPTURE =
             TableTestProgram.of(
                             "calc-array-transform-capture",
@@ -155,6 +187,30 @@ public class CalcTestPrograms {
                     // additional call operand, which must survive plan (de)serialization
                     .runSql(
                             "INSERT INTO sink_t SELECT ARRAY_TRANSFORM(a, x -> x + base) FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_UDF_TWO_LAMBDAS_CAPTURE =
+            TableTestProgram.of(
+                            "calc-udf-two-lambdas-capture",
+                            "validates calc node with a user-defined higher-order function taking two capturing lambda arguments")
+                    .setupTemporarySystemFunction("my_two_lambdas", UdfTwoLambdas.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("v INT", "b1 INT", "b2 INT")
+                                    .producedBeforeRestore(Row.of(2, 10, 3))
+                                    .producedAfterRestore(Row.of(5, 1, 2))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a INT")
+                                    .consumedBeforeRestore(Row.of(18))
+                                    .consumedAfterRestore(Row.of(16))
+                                    .build())
+                    // each lambda captures a different column, so the trailing capture operands
+                    // must be serialized and partitioned back to the owning lambda on restore
+                    .runSql(
+                            "INSERT INTO sink_t "
+                                    + "SELECT my_two_lambdas(v, x -> x + b1, x -> x * b2) FROM source_t")
                     .build();
 
     public static final TableTestProgram CALC_ARRAY_ZIP_WITH =
@@ -591,4 +647,73 @@ public class CalcTestPrograms {
                     .runSql(
                             "INSERT INTO sink_t SELECT COALESCE(a, b) AS x, COALESCE(c, d) AS y FROM t")
                     .build();
+
+    /**
+     * A user-defined {@code ARRAY_TRANSFORM} used by {@link #CALC_UDF_ARRAY_TRANSFORM} to exercise
+     * a lambda argument through compiled-plan serialization and restore. The {@code RexLambda} is
+     * serialized in the plan and, on restore, code-generated into a first-class {@link
+     * java.util.function.Function} object passed to {@code eval} ("Option A").
+     */
+    public static class UdfArrayTransform extends ScalarFunction {
+
+        @Override
+        public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+            return TypeInference.newBuilder()
+                    .inputTypeStrategy(
+                            TestLambdaStrategies.sequence(
+                                    TestLambdaStrategies.logical(LogicalTypeRoot.ARRAY),
+                                    TestLambdaStrategies.lambda(TestLambdaStrategies.elementOf(0))))
+                    .outputTypeStrategy(
+                            call ->
+                                    Optional.of(
+                                            DataTypes.ARRAY(
+                                                    call.getLambdaArgument(1)
+                                                            .orElseThrow(IllegalStateException::new)
+                                                            .getReturnDataType())))
+                    .build();
+        }
+
+        public @Nullable Integer[] eval(
+                @Nullable Integer[] array, java.util.function.Function<Integer, Integer> lambda) {
+            if (array == null) {
+                return null;
+            }
+            final Integer[] result = new Integer[array.length];
+            for (int i = 0; i < array.length; i++) {
+                result[i] = lambda.apply(array[i]);
+            }
+            return result;
+        }
+    }
+
+    /**
+     * A user-defined function with <em>two</em> lambda arguments used by {@link
+     * #CALC_UDF_TWO_LAMBDAS_CAPTURE}. Each lambda captures a different column, so the plan carries
+     * one trailing capture operand per lambda.
+     */
+    public static class UdfTwoLambdas extends ScalarFunction {
+
+        @Override
+        public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+            return TypeInference.newBuilder()
+                    .inputTypeStrategy(
+                            TestLambdaStrategies.sequence(
+                                    TestLambdaStrategies.logical(LogicalTypeRoot.INTEGER),
+                                    TestLambdaStrategies.lambda(TestLambdaStrategies.argumentOf(0)),
+                                    TestLambdaStrategies.lambda(
+                                            TestLambdaStrategies.argumentOf(0))))
+                    .outputTypeStrategy(call -> Optional.of(DataTypes.INT()))
+                    .build();
+        }
+
+        public @Nullable Integer eval(
+                @Nullable Integer value,
+                java.util.function.Function<Integer, Integer> first,
+                java.util.function.Function<Integer, Integer> second) {
+            if (value == null) {
+                return null;
+            }
+            return first.apply(value) + second.apply(value);
+        }
+    }
 }

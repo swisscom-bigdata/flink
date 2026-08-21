@@ -753,6 +753,209 @@ class NamedParameterClass extends ScalarFunction {
 * 命名参数只有在对应的类不包含重载函数和可变参函数才会生效，否则使用命名参数会导致报错。
 {{< /hint >}}
 
+### Lambda 参数
+
+自定义函数可以声明 *lambda* 参数，从而像内置的
+[`ARRAY_TRANSFORM`、`MAP_FILTER` 等函数]({{< ref "docs/sql/functions/built-in-functions" >}}#高阶函数)
+一样成为高阶函数。调用时为该参数传入一个 lambda 表达式：
+
+```sql
+SELECT my_array_transform(vals, x -> x + base) FROM t;
+```
+
+lambda 参数通过把 `LambdaInputTypeStrategy` 实现为函数的输入类型推导策略来声明。实现该接口本身就是这个声明：
+签名中不含 lambda 参数的策略不得实现它，因为正是这个接口使得不支持 lambda 的函数种类能够提前拒绝该参数。
+该接口继承自 `InputTypeStrategy`，并额外提供一个方法，SQL 与 Table API 都会使用它：
+
+* `getExpectedLambdaParameterTypes(callContext, argumentPos)` 根据同一次调用中其余（此时已解析完成的）参数，
+  绑定位于 `argumentPos` 的 lambda 的参数类型。如果该位置不是 lambda 或类型无法推导，则返回空 optional。
+  返回的列表必须包含零到四个类型，与 `FunctionN` 家族覆盖的参数个数一致；其它数量在两种接口上都会被
+  `ValidationException` 拒绝。空列表表示这是一个无参数的 lambda，而不是拒绝绑定——后者应返回空 optional。
+
+`inferInputTypes(...)` 像处理其它参数一样处理 lambda 参数：请原样返回它的数据类型，因为 lambda 永远不会被
+强制转换，只有它的运行时表示可以被重新声明（见下文）。由于 lambda 的结果类型只有在函数体解析之后才能确定，
+输出类型策略需要通过 `CallContext#getLambdaArgument(pos)` 获取它。
+
+运行时，函数按 lambda 参数个数接收一个普通的函数对象：
+
+| lambda 参数个数 | 传给 `eval` 的对象 | 同样可接受 |
+|---|---|---|
+| 0 | `org.apache.flink.util.function.Function0` | |
+| 1 | `org.apache.flink.util.function.Function1` | `java.util.function.Function` |
+| 2 | `org.apache.flink.util.function.Function2` | `java.util.function.BiFunction` |
+| 3 | `org.apache.flink.util.function.Function3` | `org.apache.flink.util.function.TriFunction` |
+| 4 | `org.apache.flink.util.function.Function4` | |
+
+lambda 最多可以有四个参数，因为 `FunctionN` 家族到此为止。`Function1`、`Function2` 和 `Function3`
+只是继承了 `Function`、`BiFunction` 和 `TriFunction`，因此这些参数个数下两种写法均可声明。`Function0`
+则相反：它继承 `java.util.function.Supplier` 并声明 `apply()`，因为生成对象的方法始终名为 `apply`。
+所以 `Supplier` 类型的参数同样可用，但只有 `Function0` 能出现在 `bridgedTo(...)` 中。
+
+函数可以按需多次调用 `apply(...)`，自行控制循环。框架负责编译 lambda 函数体并在该对象背后绑定被捕获的列，
+因此函数本身看不到这些列。该对象与接收它的那次 `eval` 调用绑定，相关规则参见下文的
+[lambda 对象契约](#lambda-对象契约)。
+
+{{< tabs "lambda-arguments" >}}
+{{< tab "Java" >}}
+```java
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.catalog.DataTypeFactory;
+import org.apache.flink.table.functions.FunctionDefinition;
+import org.apache.flink.table.functions.ScalarFunction;
+import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.inference.ArgumentCount;
+import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.ConstantArgumentCount;
+import org.apache.flink.table.types.inference.LambdaInputTypeStrategy;
+import org.apache.flink.table.types.inference.Signature;
+import org.apache.flink.table.types.inference.TypeInference;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+
+// 用户自定义的 ARRAY_TRANSFORM：(ARRAY<E>, E -> R) -> ARRAY<R>
+public static class ArrayTransformFunction extends ScalarFunction {
+
+  public Integer[] eval(Integer[] array, Function<Integer, Integer> lambda) {
+    if (array == null) {
+      return null;
+    }
+    final Integer[] result = new Integer[array.length];
+    for (int i = 0; i < array.length; i++) {
+      result[i] = lambda.apply(array[i]);
+    }
+    return result;
+  }
+
+  @Override
+  public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+    return TypeInference.newBuilder()
+      .inputTypeStrategy(new ArrayTransformInputTypeStrategy())
+      .outputTypeStrategy(
+        callContext ->
+          Optional.of(
+            DataTypes.ARRAY(
+              callContext
+                .getLambdaArgument(1)
+                .orElseThrow(IllegalStateException::new)
+                .getReturnDataType())))
+      .build();
+  }
+}
+
+public static class ArrayTransformInputTypeStrategy implements LambdaInputTypeStrategy {
+
+  @Override
+  public ArgumentCount getArgumentCount() {
+    return ConstantArgumentCount.of(2);
+  }
+
+  @Override
+  public Optional<List<DataType>> getExpectedLambdaParameterTypes(
+      CallContext callContext, int argumentPos) {
+    if (argumentPos != 1) {
+      return Optional.empty();
+    }
+    // lambda 的唯一参数就是第 0 个参数所对应数组的元素类型
+    return Optional.of(
+      Collections.singletonList(callContext.getArgumentDataTypes().get(0).getChildren().get(0)));
+  }
+
+  @Override
+  public Optional<List<DataType>> inferInputTypes(CallContext callContext, boolean throwOnFailure) {
+    final List<DataType> args = callContext.getArgumentDataTypes();
+    if (args.size() != 2
+        || !args.get(0).getLogicalType().is(LogicalTypeRoot.ARRAY)
+        || !args.get(1).getLogicalType().is(LogicalTypeRoot.FUNCTION)) {
+      if (throwOnFailure) {
+        throw callContext.newValidationError("Expected an ARRAY and a lambda.");
+      }
+      return Optional.empty();
+    }
+    // 原样返回，从而保证 lambda 参数不会被强制转换
+    return Optional.of(args);
+  }
+
+  @Override
+  public List<Signature> getExpectedSignatures(FunctionDefinition definition) {
+    return Collections.singletonList(
+      Signature.of(Signature.Argument.of("ARRAY"), Signature.Argument.of("(x) -> y")));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+一个函数可以声明多个 lambda 参数，每个都会作为独立的函数对象传入并独立求值，
+`getExpectedLambdaParameterTypes(...)` 需要为它们各自的位置分别返回列表。
+
+lambda 参数在内部携带 `DataTypes.FUNCTION(parameterCount)` 类型，而它的参数类型和结果类型则通过
+`CallContext#getLambdaArgument(int)` 获取。该 `FUNCTION` 类型仅用于 lambda 参数：它不能作为列类型、状态类型
+或函数的返回类型，这样使用时会报错。
+
+函数与它的 lambda 之间交换的值属于函数自身，因此以内部数据结构读取参数的函数，也会以同样的表示接收它的
+lambda，即用 `FunctionData0` 到 `FunctionData4` 代替 `Function0` 到 `Function4`。它与其它参数的表示
+一样声明在参数上，在 `inferInputTypes(...)` 中对该参数类型做 bridge 即可：
+
+```java
+final List<DataType> args = callContext.getArgumentDataTypes();
+return Optional.of(
+  Arrays.asList(
+    DataTypes.ARRAY(DataTypes.STRING().bridgedTo(StringData.class)).bridgedTo(ArrayData.class),
+    args.get(1).bridgedTo(FunctionData1.class)));
+```
+
+这样的对象交换的是 lambda 参数类型与结果类型的内部表示。不对 lambda 参数做 bridge 则表示使用外部类，
+也是默认行为。声明与 `eval` 方法不一致时，会在查询规划阶段报错，而不是在运行时。
+
+#### lambda 对象契约
+
+收到的函数对象并不是普通的值，而是指向框架编译出的表达式的句柄，并且与某一次 `eval` 调用绑定。
+下列规则的规范版本位于声明该参数的接口 `LambdaInputTypeStrategy` 的 Javadoc 中：
+
+* **生命周期。** 该对象仅在接收它的那次 `eval` 调用期间有效。不能把它保存到字段或状态中、不能返回它、
+  不能交给生命周期长于本次调用的对象，也不能序列化它。`eval` 返回之后的行为是未定义的，框架也不会对此
+  做检查：被保留下来的对象在技术上仍然可以调用，但这样使用并不受支持。
+* **对象标识。** 外层调用每求值一次就会创建一个新的对象 —— 按行创建，如果该调用本身位于某个 lambda
+  函数体中则按元素创建 —— 因此不能把它的标识用作缓存键。
+* **捕获的值。** 所有被捕获的值都在进入 `eval` 之前求值并绑定在对象背后，因此同一次 `eval` 调用中的
+  每次应用看到的都是同一份快照。
+* **调用次数与顺序。** 循环由函数自己掌控：它可以按任意顺序应用该对象零次、一次或任意多次。框架不会
+  代替函数去应用 lambda，因此函数体只在函数应用它的地方才会被求值。
+* **参数与结果。** `apply` 的参数可以为 `null`，返回值也可以为 `null`（即 SQL `NULL`）。使用外部类的
+  `FunctionN` 交换的是外部值；使用内部类的 `FunctionDataN` 返回的可能是由求值器持有的可变内存，
+  下一次应用会复用它。如果函数需要跨多次应用保留或缓存这样的内部结果，必须先做深拷贝。
+* **嵌套。** 不同 lambda 对象的应用可以任意深度地嵌套：函数体中可以再包含一个高阶函数调用，该函数会
+  收到属于它自己的对象。但一个对象永远不会在它自己的函数体中被重入——SQL 没有递归——函数自身也不得
+  构造这样的调用。
+* **线程亲和性。** 只能在调用 `eval` 的那个线程上、并且只在该调用仍在栈上时应用该对象。它不是线程安全的：
+  多次应用不能重叠，也不能把它交给其它线程、线程池、并行流或 `CompletableFuture` 的回调。框架不会强制
+  检查这一点，也无法通过试验验证：编译出的函数体是该调用点上所有对象共享的同一个实例，因此一个只做简单
+  算术的函数体看上去似乎可以并发应用，而一个构造 `ROW`、`ARRAY` 或调用其它函数的函数体则会破坏其背后
+  复用的缓冲区。
+* **异步函数。** `AsyncScalarFunction` 和 `AsyncTableFunction` 不能声明 lambda 参数，否则会报错
+  *"Lambda arguments are not supported for functions of kind 'ASYNC_SCALAR'"*。异步函数在 `eval` 返回
+  之后才完成 future，而且可能在另一个线程上完成，这违反上面两条规则。但高阶函数的**调用**仍然可以作为
+  异步函数的参数使用。反过来，`AsyncScalarFunction` 也不能在 lambda 函数体中调用：
+  *"Asynchronous scalar functions are not supported in the body of a lambda expression"*。
+* **异常。** 函数体求值过程中抛出的非受检异常会原样从 `apply` 抛出，与内置高阶函数在同样的函数体下
+  表现完全一致；只有 `apply` 无法声明的 throwable 才会被包装成 `org.apache.flink.util.FlinkRuntimeException`，
+  并把原始异常作为它的 cause。推荐让它继续向上传播，这样会像其它函数失败一样让任务失败。捕获它是允许的，
+  但这次应用不会产生结果，函数体触及过的任何内容都会处于未定义状态，并且外层调用不会被重试。
+* **`open` / `close`。** `open(FunctionContext)` 和 `close()` 中不存在 lambda 对象，也不允许在其中获取或
+  应用它。编译出的函数体由框架管理生命周期：它随外层算子一起初始化和清理；在函数体中调用的函数会像在
+  其它位置被调用时一样被实例化、`open` 和 `close`。
+* **确定性。** 该对象的确定性完全取决于调用方所写的函数体，因此用相同的参数应用两次不一定得到相同的结果。
+
+{{< hint info >}}
+* lambda 只能作为高阶函数的参数使用，并且必须通过类型推导声明 —— 仅在 `eval` 中声明一个 `Function`
+  参数而没有对应的 `LambdaInputTypeStrategy` 是不支持的。
+* lambda 函数体可以捕获外层查询的列以及外层 lambda 的参数，还可以捕获外层查询的聚合函数、`OVER` 窗口和子查询。捕获的值按行或按组求值，在调用函数之前完成。
+{{< /hint >}}
+
 ### 确定性
 
 每个用户自定义函数类都可以通过重写 `isDeterministic()` 方法来声明它是否产生确定性的结果。如果该函数不是纯粹函数式的（如`random()`, `date()`, 或`now()`），该方法必须返回 `false`。默认情况下，`isDeterministic()` 返回 `true`。
