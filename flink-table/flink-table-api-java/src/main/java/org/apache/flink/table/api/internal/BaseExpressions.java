@@ -36,6 +36,7 @@ import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.UnresolvedDataType;
 import org.apache.flink.util.function.Function1;
 import org.apache.flink.util.function.Function2;
+import org.apache.flink.util.function.Function3;
 
 import java.util.Arrays;
 import java.util.stream.Stream;
@@ -172,10 +173,14 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LTRIM;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAKE_VALID_UTF8;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_CONTAINS_KEY;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_ENTRIES;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_FILTER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_FROM_ENTRIES;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_KEYS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_TRANSFORM_KEYS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_TRANSFORM_VALUES;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_UNION;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_VALUES;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_ZIP_WITH;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MD5;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MIN;
@@ -380,6 +385,42 @@ public abstract class BaseExpressions<InType, OutType> {
      */
     public OutType arrayZipWith(InType array, Function2<OutType, OutType, OutType> lambdaFunction) {
         return lambdaCall(this, ARRAY_ZIP_WITH, lambdaFunction, objectToExpression(array));
+    }
+
+    /**
+     * Returns a new map with only the entries for which the given predicate lambda {@code (key,
+     * value)} returns {@code TRUE}. Returns {@code NULL} for a {@code NULL} input map.
+     */
+    public OutType mapFilter(Function2<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_FILTER, lambdaFunction);
+    }
+
+    /**
+     * Returns a new map with each key replaced by the given lambda {@code (key, value)}, leaving
+     * the values unchanged. A new key that is {@code NULL} or duplicates another key fails the
+     * query. Returns {@code NULL} for a {@code NULL} input map.
+     */
+    public OutType mapTransformKeys(Function2<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_TRANSFORM_KEYS, lambdaFunction);
+    }
+
+    /**
+     * Returns a new map with each value replaced by the given lambda {@code (key, value)}, leaving
+     * the keys unchanged. Returns {@code NULL} for a {@code NULL} input map.
+     */
+    public OutType mapTransformValues(Function2<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_TRANSFORM_VALUES, lambdaFunction);
+    }
+
+    /**
+     * Merges this map and {@code map} over the union of their keys by applying the given lambda
+     * {@code (key, value1, value2)}, passing {@code NULL} where a key is absent from a map. Both
+     * key types are generalized to their common type. Returns {@code NULL} if either map is {@code
+     * NULL}.
+     */
+    public OutType mapZipWith(
+            InType map, Function3<OutType, OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, MAP_ZIP_WITH, lambdaFunction, objectToExpression(map));
     }
 
     /**

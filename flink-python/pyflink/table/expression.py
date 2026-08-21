@@ -350,6 +350,23 @@ class _LambdaFunction2(object):
         implements = ["org.apache.flink.util.function.Function2"]
 
 
+class _LambdaFunction3(object):
+    """
+    Adapts a three-parameter Python lambda to a Java ``org.apache.flink.util.function.Function3``
+    (e.g. for ``mapZipWith``).
+    """
+
+    def __init__(self, func):
+        self._func = func
+
+    def apply(self, j_expr1, j_expr2, j_expr3):
+        return _get_java_expression(
+            self._func(Expression(j_expr1), Expression(j_expr2), Expression(j_expr3)))
+
+    class Java:
+        implements = ["org.apache.flink.util.function.Function3"]
+
+
 class TimeIntervalUnit(Enum):
     """
     Units for working with time intervals.
@@ -2111,6 +2128,71 @@ class Expression(Generic[T]):
         return Expression(
             self._j_expr.arrayZipWith(_get_java_expression(array),
                                       _LambdaFunction2(combiner)))
+
+    def map_filter(
+            self,
+            predicate: Callable[['Expression', 'Expression'], 'Expression']) -> 'Expression':
+        """
+        Returns a new map containing only the entries for which ``predicate`` ``(key, value) ->
+        ...`` returns TRUE. A FALSE or NULL predicate excludes the entry. If the input map is NULL,
+        the function returns NULL.
+
+        Example:
+        ::
+
+            >>> col("map_col").map_filter(lambda k, v: v > 0)
+        """
+        return Expression(self._j_expr.mapFilter(_LambdaFunction2(predicate)))
+
+    def map_transform_keys(
+            self,
+            transformation: Callable[['Expression', 'Expression'], 'Expression']) -> 'Expression':
+        """
+        Returns a new map with each key replaced by the result of ``transformation`` ``(key, value)
+        -> new_key``; the values are unchanged. A transformed key that is NULL or duplicates another
+        key fails the query. If the input map is NULL, the function returns NULL.
+
+        Example:
+        ::
+
+            >>> col("map_col").map_transform_keys(lambda k, v: k + 1)
+        """
+        return Expression(self._j_expr.mapTransformKeys(_LambdaFunction2(transformation)))
+
+    def map_transform_values(
+            self,
+            transformation: Callable[['Expression', 'Expression'], 'Expression']) -> 'Expression':
+        """
+        Returns a new map with each value replaced by the result of ``transformation`` ``(key,
+        value) -> new_value``; the keys are unchanged. If the input map is NULL, the function
+        returns NULL.
+
+        Example:
+        ::
+
+            >>> col("map_col").map_transform_values(lambda k, v: v * 10)
+        """
+        return Expression(self._j_expr.mapTransformValues(_LambdaFunction2(transformation)))
+
+    def map_zip_with(
+            self,
+            map,
+            combiner: Callable[['Expression', 'Expression', 'Expression'], 'Expression']) \
+            -> 'Expression':
+        """
+        Merges this map and ``map`` over the union of their keys by applying ``combiner`` ``(key,
+        value1, value2) -> new_value`` to each key and the two values (NULL where the key is absent
+        from a map). Both key types are generalized to their common type. If either map is NULL,
+        the function returns NULL.
+
+        Example:
+        ::
+
+            >>> col("map_col").map_zip_with(col("other_col"), lambda k, v1, v2: v1 + v2)
+        """
+        return Expression(
+            self._j_expr.mapZipWith(_get_java_expression(map),
+                                    _LambdaFunction3(combiner)))
 
     def split(self, delimiter) -> 'Expression':
         """
