@@ -75,6 +75,18 @@ public final class TypeInferenceOperandInference implements SqlOperandTypeInfere
                         returnType,
                         typeInference.getStaticArguments().orElse(null));
         try {
+            // Operand type inference runs top-down during Calcite's inferUnknownTypes pass, which
+            // may reach this call while an enclosing lambda parameter is still unbound (a
+            // parameter reference operand is transiently ANY). In that case defer: the operand
+            // types are inferred in a later pass once the enclosing parameter is bound (mirrors the
+            // operand checker and the built-in array higher-order function operators).
+            if (TypeInferenceOperandChecker.hasUnresolvedLambdaParameterOperand(callBinding)) {
+                return;
+            }
+            // Bind lambda parameter types (if any) so that the lambda operands carry a concrete
+            // FUNCTION type before the input type strategy inspects them.
+            TypeInferenceOperandChecker.bindLambdaArguments(
+                    callBinding, callContext, typeInference);
             if (TypeInferenceUtil.validateArgumentCount(
                     typeInference.getInputTypeStrategy().getArgumentCount(),
                     callContext.getArgumentDataTypes().size(),

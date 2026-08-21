@@ -1,6 +1,6 @@
 ---
 title: "Regular Expressions"
-weight: 13
+weight: 14
 type: docs
 sqlFunctions: regex
 ---

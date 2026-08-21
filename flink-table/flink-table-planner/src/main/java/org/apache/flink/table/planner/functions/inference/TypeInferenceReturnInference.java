@@ -33,6 +33,7 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.type.SqlReturnTypeInference;
+import org.apache.calcite.sql.type.SqlTypeName;
 
 import static org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTypeFactory;
 import static org.apache.flink.table.types.inference.TypeInferenceUtil.createInvalidCallException;
@@ -64,6 +65,15 @@ public final class TypeInferenceReturnInference implements SqlReturnTypeInferenc
 
     @Override
     public RelDataType inferReturnType(SqlOperatorBinding binding) {
+        if (binding instanceof SqlCallBinding
+                && TypeInferenceOperandChecker.hasUnresolvedLambdaParameterOperand(
+                        (SqlCallBinding) binding)) {
+            // An enclosing lambda parameter is not bound yet, so an operand referencing it (and
+            // therefore the output type derived from it) cannot be inferred. Return a placeholder;
+            // the return type is recomputed in a later validation pass once the enclosing parameter
+            // is bound (mirrors the operand checker's deferral).
+            return unwrapTypeFactory(binding).createSqlType(SqlTypeName.ANY);
+        }
         final CallContext callContext = createCallContext(binding);
         try {
             return inferReturnTypeOrError(unwrapTypeFactory(binding), callContext);

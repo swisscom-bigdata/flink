@@ -1,6 +1,6 @@
 ---
 title: "JSON"
-weight: 10
+weight: 11
 type: docs
 sqlFunctions: json
 ---

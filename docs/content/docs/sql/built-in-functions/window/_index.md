@@ -1,6 +1,6 @@
 ---
 title: "Window"
-weight: 18
+weight: 19
 type: docs
 sqlFunctions: window
 markdownFunctions: true

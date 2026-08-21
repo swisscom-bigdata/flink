@@ -33,6 +33,7 @@ import org.apache.flink.table.planner.functions.bridging.BridgingSqlAggFunction;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.BuiltInSqlOperator;
 import org.apache.flink.table.planner.functions.sql.SqlDefaultArgOperator;
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil;
 import org.apache.flink.table.planner.typeutils.SymbolUtil.SerializableSymbol;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
@@ -47,7 +48,10 @@ import org.apache.calcite.avatica.util.ByteString;
 import org.apache.calcite.rel.core.CorrelationId;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexLambda;
+import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.rex.RexUnknownAs;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
@@ -91,6 +95,7 @@ import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSe
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_CONTAINS_NULL;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_CORREL;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_EXPR;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_INDEX;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_INPUT_INDEX;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_INTERNAL_NAME;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_KIND;
@@ -99,6 +104,7 @@ import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSe
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_OPERANDS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_ORDER_DIRECTIONS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_ORDER_KEYS;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_PARAMETERS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_PARTITION_KEYS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_RANGES;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_SARG;
@@ -112,6 +118,8 @@ import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSe
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_CORREL_VARIABLE;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_FIELD_ACCESS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_INPUT_REF;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_LAMBDA;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_LAMBDA_REF;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_LITERAL;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_PATTERN_INPUT_REF;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.KIND_TABLE_ARG_CALL;
@@ -156,6 +164,10 @@ final class RexNodeJsonDeserializer extends StdDeserializer<RexNode> {
                 return deserializeTableArgCall(jsonNode, serdeContext);
             case KIND_CALL:
                 return deserializeCall(jsonNode, serdeContext);
+            case KIND_LAMBDA:
+                return deserializeLambda(jsonNode, serdeContext);
+            case KIND_LAMBDA_REF:
+                return deserializeLambdaRef(jsonNode, serdeContext);
             default:
                 throw new TableException("Cannot convert to RexNode: " + jsonNode.toPrettyString());
         }
@@ -369,6 +381,92 @@ final class RexNodeJsonDeserializer extends StdDeserializer<RexNode> {
             result.add(elementDeserializer.apply(element));
         }
         return result;
+    }
+
+    private static RexNode deserializeLambda(JsonNode jsonNode, SerdeContext serdeContext)
+            throws IOException {
+        final ArrayNode parameterNodes = (ArrayNode) jsonNode.get(FIELD_NAME_PARAMETERS);
+        final List<RexLambdaRef> parameters = new ArrayList<>();
+        for (JsonNode parameterNode : parameterNodes) {
+            parameters.add((RexLambdaRef) deserialize(parameterNode, serdeContext));
+        }
+        final RexNode expression = deserialize(jsonNode.get(FIELD_NAME_EXPR), serdeContext);
+        // The FUNCTION type is recomputed from the parameter and body types by RexBuilder.
+        final RexLambda lambda =
+                (RexLambda) serdeContext.getRexBuilder().makeLambdaCall(expression, parameters);
+        validateLambda(lambda);
+        return lambda;
+    }
+
+    /**
+     * Validates a lambda read from a compiled plan against the closed-lambda invariant that {@link
+     * HigherOrderFunctionUtil#checkClosed} establishes when the plan is written and that code
+     * generation relies on when it is read.
+     *
+     * <p>A plan is an external input that a different version may have written, and a {@link
+     * RexLambdaRef} binds by index: without this check, a parameter list that no longer carries the
+     * expected indices, or a body reference whose index no longer agrees with the name and type the
+     * plan records for that parameter, would bind silently to the wrong parameter instead of
+     * failing.
+     */
+    private static void validateLambda(RexLambda lambda) {
+        try {
+            HigherOrderFunctionUtil.checkClosed(lambda);
+        } catch (IllegalStateException e) {
+            throw new TableException(
+                    String.format(
+                            "Invalid lambda expression in the compiled plan: %s. The plan cannot be"
+                                    + " restored.",
+                            lambda),
+                    e);
+        }
+        final List<RexLambdaRef> parameters = lambda.getParameters();
+        lambda.getExpression()
+                .accept(
+                        new RexShuttle() {
+                            @Override
+                            public RexNode visitLambdaRef(RexLambdaRef ref) {
+                                // checkClosed has verified that the index is declared
+                                final RexLambdaRef parameter =
+                                        parameters.get(
+                                                HigherOrderFunctionUtil.parameterPosition(
+                                                        parameters, ref.getIndex()));
+                                if (!parameter.getName().equals(ref.getName())
+                                        || !parameter.getType().equals(ref.getType())) {
+                                    throw new TableException(
+                                            String.format(
+                                                    "Lambda parameter #%d is declared as '%s' of"
+                                                            + " type %s in the compiled plan but"
+                                                            + " referenced as '%s' of type %s in"
+                                                            + " the lambda body: %s. A lambda"
+                                                            + " reference is positional, so the"
+                                                            + " plan cannot be restored.",
+                                                    ref.getIndex(),
+                                                    parameter.getName(),
+                                                    parameter.getType(),
+                                                    ref.getName(),
+                                                    ref.getType(),
+                                                    lambda));
+                                }
+                                return ref;
+                            }
+
+                            @Override
+                            public RexNode visitLambda(RexLambda nestedLambda) {
+                                // a nested lambda is its own closed scope and was validated when it
+                                // was deserialized
+                                return nestedLambda;
+                            }
+                        });
+    }
+
+    private static RexNode deserializeLambdaRef(JsonNode jsonNode, SerdeContext serdeContext) {
+        final String name = jsonNode.required(FIELD_NAME_NAME).asText();
+        final int index = jsonNode.required(FIELD_NAME_INDEX).asInt();
+        final RelDataType type =
+                RelDataTypeJsonDeserializer.deserialize(
+                        jsonNode.get(FIELD_NAME_TYPE), serdeContext);
+        return new RexLambdaRef(index, name, type);
     }
 
     private static RexNode deserializeCall(JsonNode jsonNode, SerdeContext serdeContext)

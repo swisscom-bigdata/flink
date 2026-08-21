@@ -1,6 +1,6 @@
 ---
 title: "Utility"
-weight: 16
+weight: 17
 type: docs
 sqlFunctions: utility
 ---

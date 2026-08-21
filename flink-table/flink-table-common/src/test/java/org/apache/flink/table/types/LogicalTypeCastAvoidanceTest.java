@@ -32,6 +32,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DistinctType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.MapType;
@@ -270,7 +271,16 @@ class LogicalTypeCastAvoidanceTest {
                                                 new StructuredType.StructuredAttribute(
                                                         "diff", new TinyIntType(false))))
                                 .build(),
-                        false));
+                        false),
+
+                // a FUNCTION type only avoids a cast to a function type of the same arity
+                of(new FunctionType(1), new FunctionType(1), true),
+                of(new FunctionType(1), new FunctionType(2), false),
+                of(new FunctionType(2), new FunctionType(1), false),
+                of(new FunctionType(1), new IntType(), false),
+                of(new IntType(), new FunctionType(1), false),
+                of(new ArrayType(new FunctionType(1)), new ArrayType(new FunctionType(1)), true),
+                of(new ArrayType(new FunctionType(1)), new ArrayType(new FunctionType(2)), false));
     }
 
     @ParameterizedTest(name = "{index}: [{0} COMPATIBLE {1} => {2}")

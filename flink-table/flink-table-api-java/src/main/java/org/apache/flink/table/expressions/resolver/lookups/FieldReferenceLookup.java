@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -63,6 +64,41 @@ public class FieldReferenceLookup {
 
     public FieldReferenceLookup(List<QueryOperation> queryOperations) {
         fieldReferences = prepareFieldReferences(queryOperations);
+    }
+
+    // The second parameter only distinguishes this from the public constructor, which has the same
+    // erasure (both take a List). It carries the already-prepared field references directly.
+    private FieldReferenceLookup(
+            List<Map<String, FieldReference>> fieldReferences, Void alreadyPrepared) {
+        this.fieldReferences = fieldReferences;
+    }
+
+    /**
+     * Returns a copy of this lookup with the given field names removed. Used when resolving a
+     * lambda body so that lambda parameters (and enclosing lambda parameters) shadow input columns
+     * of the same name, matching the scoping used on the SQL side.
+     *
+     * @param names the field names to hide
+     * @return a lookup that no longer resolves the given names
+     */
+    public FieldReferenceLookup withoutFields(Set<String> names) {
+        if (names.isEmpty()) {
+            return this;
+        }
+        final List<Map<String, FieldReference>> filtered =
+                fieldReferences.stream()
+                        .map(
+                                input ->
+                                        input.entrySet().stream()
+                                                .filter(e -> !names.contains(e.getKey()))
+                                                .collect(
+                                                        Collectors.toMap(
+                                                                Map.Entry::getKey,
+                                                                Map.Entry::getValue,
+                                                                (u, v) -> u,
+                                                                LinkedHashMap::new)))
+                        .collect(Collectors.toList());
+        return new FieldReferenceLookup(filtered, null);
     }
 
     /**

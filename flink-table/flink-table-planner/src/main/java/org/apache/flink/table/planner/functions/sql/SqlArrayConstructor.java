@@ -24,7 +24,10 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.fun.SqlArrayValueConstructor;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.type.SqlTypeUtil;
+
+import java.util.List;
 
 /**
  * {@link SqlOperator} for <code>ARRAY</code>, which makes explicit casting if the element type not
@@ -34,8 +37,15 @@ public class SqlArrayConstructor extends SqlArrayValueConstructor {
 
     @Override
     public RelDataType inferReturnType(SqlOperatorBinding opBinding) {
-        RelDataType type =
-                getComponentType(opBinding.getTypeFactory(), opBinding.collectOperandTypes());
+        final List<RelDataType> operandTypes = opBinding.collectOperandTypes();
+        if (SqlValidatorUtils.containsUnresolvedLambdaParameter(operandTypes)) {
+            // An enclosing lambda parameter is not bound yet, so neither the component type nor the
+            // casts to it can be determined. Return a placeholder; the array type is recomputed in
+            // a later validation pass once the enclosing parameter is bound.
+            return opBinding.getTypeFactory().createSqlType(SqlTypeName.ANY);
+        }
+
+        RelDataType type = getComponentType(opBinding.getTypeFactory(), operandTypes);
         if (null == type) {
             return null;
         }

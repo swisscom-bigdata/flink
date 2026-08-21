@@ -26,6 +26,7 @@ import org.apache.flink.table.catalog.FunctionLookup;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.LookupCallExpression;
 import org.apache.flink.table.expressions.UnresolvedCallExpression;
+import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
 import org.apache.flink.table.expressions.utils.ApiExpressionDefaultVisitor;
 
 import java.util.List;
@@ -72,6 +73,12 @@ public class LookupCallResolver extends ApiExpressionDefaultVisitor<Expression> 
         // additionally handle the ApiExpressions here
         if (other instanceof ApiExpression) {
             return ((ApiExpression) other).toExpr().accept(this);
+        } else if (other instanceof UnresolvedLambdaExpression) {
+            // a lambda hides its body from getChildren(), but the calls in it must be resolved
+            // before the expression reaches the visitors that expect no lookup calls anymore
+            final UnresolvedLambdaExpression lambda = (UnresolvedLambdaExpression) other;
+            return new UnresolvedLambdaExpression(
+                    lambda.getParameterNames(), lambda.getBody().accept(this));
         } else {
             return defaultMethod(other);
         }

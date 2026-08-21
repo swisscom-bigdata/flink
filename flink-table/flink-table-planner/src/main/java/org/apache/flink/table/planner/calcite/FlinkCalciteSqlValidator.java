@@ -27,10 +27,14 @@ import org.apache.flink.table.api.config.TableConfigOptions.ColumnExpansionStrat
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.functions.FunctionKind;
+import org.apache.flink.table.functions.python.PythonFunction;
 import org.apache.flink.table.planner.catalog.CatalogSchemaModel;
 import org.apache.flink.table.planner.catalog.CatalogSchemaTable;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil;
+import org.apache.flink.table.planner.functions.utils.ScalarSqlFunction;
 import org.apache.flink.table.planner.plan.FlinkCalciteCatalogReader;
 import org.apache.flink.table.planner.plan.utils.FlinkRexUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
@@ -46,6 +50,7 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.runtime.Resources;
 import org.apache.calcite.schema.SchemaVersion;
 import org.apache.calcite.sql.JoinType;
 import org.apache.calcite.sql.SqlAsOperator;
@@ -57,6 +62,7 @@ import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlJoin;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLambda;
 import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlModelCall;
 import org.apache.calcite.sql.SqlNode;
@@ -74,9 +80,12 @@ import org.apache.calcite.sql.type.SqlOperandTypeChecker;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.type.SqlTypeUtil;
 import org.apache.calcite.sql.validate.DelegatingScope;
+import org.apache.calcite.sql.validate.ExtraCalciteResource;
 import org.apache.calcite.sql.validate.IdentifierNamespace;
 import org.apache.calcite.sql.validate.IdentifierSnapshotNamespace;
+import org.apache.calcite.sql.validate.ParameterScope;
 import org.apache.calcite.sql.validate.SelectScope;
+import org.apache.calcite.sql.validate.SqlLambdaScope;
 import org.apache.calcite.sql.validate.SqlQualified;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorCatalogReader;
@@ -93,6 +102,7 @@ import java.math.BigDecimal;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -108,6 +118,24 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 /** Extends Calcite's {@link SqlValidator} by Flink-specific behavior. */
 @Internal
 public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
+
+    private static final ExtraCalciteResource EXTRA_RESOURCE =
+            Resources.create(ExtraCalciteResource.class);
+
+    /**
+     * Kinds that make a call a sub-query construct in a lambda body although the call itself is not
+     * of a {@link SqlKind#QUERY} kind (see {@code validateLambdaBody}).
+     */
+    private static final Set<SqlKind> QUERY_CONSTRUCTS_IN_LAMBDA_BODY =
+            Collections.unmodifiableSet(
+                    EnumSet.of(
+                            SqlKind.SCALAR_QUERY,
+                            SqlKind.IN,
+                            SqlKind.NOT_IN,
+                            SqlKind.SOME,
+                            SqlKind.ALL,
+                            SqlKind.EXISTS,
+                            SqlKind.UNIQUE));
 
     // Enables CallContext#getOutputDataType() when validating SQL expressions.
     private SqlNode sqlNodeForExpectedOutputType;
@@ -170,6 +198,246 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
             }
         }
         super.validateLiteral(literal);
+    }
+
+    @Override
+    public void validateLambda(SqlLambda lambdaExpr) {
+        // Reject lambda parameter names that collide with the reserved prefix used for lifted
+        // capture parameters (see HigherOrderFunctionUtil#CAPTURE_PARAM_PREFIX). Otherwise a
+        // user-chosen name such as "cap$x" would be miscounted as a lifted capture during code
+        // generation and drop a real declared operand from the call. Duplicate names are rejected
+        // for a related reason: the body binds parameters by name, and the lambda scope keys them
+        // by name, so a duplicate would collapse into a single parameter and the derived FUNCTION
+        // type would disagree with the declared arity (an internal error later on).
+        final Set<String> declared = new HashSet<>();
+        for (SqlNode parameter : lambdaExpr.getParameters()) {
+            final String name = ((SqlIdentifier) parameter).getSimple();
+            if (HigherOrderFunctionUtil.isCaptureName(name)) {
+                throw newValidationError(
+                        parameter,
+                        EXTRA_RESOURCE.reservedLambdaParameterName(
+                                name, HigherOrderFunctionUtil.CAPTURE_PARAM_PREFIX));
+            }
+            if (!declared.add(name)) {
+                throw newValidationError(
+                        parameter, EXTRA_RESOURCE.duplicateLambdaParameterName(name));
+            }
+        }
+
+        // A lambda body is compiled into an expression that is evaluated per element. Aggregates,
+        // OVER windows and sub-queries over the columns of the enclosing query are fine there --
+        // they are evaluated once per row and the body sees their result -- but the same constructs
+        // over a lambda *parameter* have no meaning: the parameter only exists per element, and
+        // there is no group to aggregate it over (ARRAY_REDUCE is the fold for that). The checks
+        // that reject them in an ordinary projection (validateExpr, the aggregate finders) do not
+        // descend into a lambda body, so without this they would surface as an internal error much
+        // later -- deriving the type of an aggregate over an unbound lambda parameter fails with
+        // "Type is not supported: ANY". Table functions produce rows rather than a value and are
+        // rejected outright; otherwise they reach code generation and fail with an unset collector.
+        // Asynchronous scalar functions are rejected outright for the same reason: their result
+        // only arrives after the per-element expression consuming it has been evaluated, and the
+        // rule that extracts them out of a projection does not descend into lambda bodies either.
+        // Python scalar functions are rejected outright too: they are evaluated by a separate
+        // Python operator that a projection's Python calls are split out into, which cannot happen
+        // per element inside a lambda body.
+        // Both checks must run before super, which derives the body's type.
+        final SqlLambdaScope scope = (SqlLambdaScope) getLambdaScope(lambdaExpr);
+        validateLambdaBody(lambdaExpr.getExpression(), visibleLambdaParameters(scope));
+
+        super.validateLambda(lambdaExpr);
+    }
+
+    /**
+     * Registers the scopes of the lambdas in a stand-alone SQL expression -- a computed column, a
+     * watermark, or {@code callSql} of the Table API -- before validating it. Calcite registers
+     * scopes only when the expression is a query, so such a lambda would otherwise have no {@link
+     * SqlLambdaScope} and its parameters would not resolve. The scope registration is private to
+     * Calcite's {@code validateScopedExpression}, hence the scopes' parent is an equivalent {@link
+     * ParameterScope}, which resolves a captured column from the same name-to-type map as the one
+     * created by super. See {@link #validateCall} for the other half.
+     */
+    @Override
+    public SqlNode validateParameterizedExpression(
+            SqlNode topNode, Map<String, RelDataType> nameToTypeMap) {
+        if (!topNode.isA(SqlKind.TOP_LEVEL)) {
+            registerOutermostLambdas(new ParameterScope(this, nameToTypeMap), topNode);
+        }
+        return super.validateParameterizedExpression(topNode, nameToTypeMap);
+    }
+
+    private void registerOutermostLambdas(SqlValidatorScope scope, @Nullable SqlNode node) {
+        if (node instanceof SqlLambda) {
+            // Also registers the lambdas nested in the body, under this lambda's scope.
+            registerQuery(scope, null, node, node, null, false);
+        } else if (node instanceof SqlCall && !node.getKind().belongsTo(SqlKind.QUERY)) {
+            ((SqlCall) node)
+                    .getOperandList()
+                    .forEach(operand -> registerOutermostLambdas(scope, operand));
+        } else if (node instanceof SqlNodeList) {
+            ((SqlNodeList) node).forEach(child -> registerOutermostLambdas(scope, child));
+        }
+    }
+
+    /**
+     * Validates the operands of an outermost lambda of a stand-alone SQL expression (see {@link
+     * #validateParameterizedExpression}) in the lambda's own scope. The scope of such an expression
+     * is a {@link ParameterScope}, whose {@code getOperandScope} returns itself for every call,
+     * whereas the scopes of a query hand out the lambda's scope for a lambda (see {@code
+     * DelegatingScope#getOperandScope}).
+     */
+    @Override
+    public void validateCall(SqlCall call, SqlValidatorScope scope) {
+        if (call instanceof SqlLambda && scope instanceof ParameterScope) {
+            call.getOperator().validateCall(call, this, scope, getLambdaScope((SqlLambda) call));
+            return;
+        }
+        super.validateCall(call, scope);
+    }
+
+    /**
+     * Returns the names of every lambda parameter visible in the given lambda scope: its own
+     * parameters plus those of the lambdas it is nested in, since a body may close over them.
+     */
+    private static Set<String> visibleLambdaParameters(SqlLambdaScope scope) {
+        final Set<String> parameters = new HashSet<>();
+        for (SqlValidatorScope current = scope;
+                current instanceof DelegatingScope;
+                current = ((DelegatingScope) current).getParent()) {
+            if (current instanceof SqlLambdaScope) {
+                parameters.addAll(((SqlLambdaScope) current).getParameterTypes().keySet());
+            }
+        }
+        return parameters;
+    }
+
+    private static boolean isPythonScalarFunction(SqlOperator operator) {
+        final FunctionDefinition definition =
+                operator instanceof ScalarSqlFunction
+                        ? ((ScalarSqlFunction) operator).scalarFunction()
+                        : ShortcutUtils.unwrapFunctionDefinition(operator);
+        return definition instanceof PythonFunction && definition.getKind() == FunctionKind.SCALAR;
+    }
+
+    /**
+     * Rejects the constructs that a lambda body cannot contain, naming the offending node.
+     *
+     * <p>Nested lambdas are descended into -- each is validated in its own right, but reporting the
+     * innermost offending node here keeps the error at the position the user wrote -- with their
+     * parameters added to {@code lambdaParameters}, as they too cannot be aggregated over.
+     * Sub-queries are not descended into: they are separate queries whose contents are validated on
+     * their own terms.
+     *
+     * @param node a node of the lambda body
+     * @param lambdaParameters names of the lambda parameters visible at {@code node}
+     */
+    private void validateLambdaBody(SqlNode node, Set<String> lambdaParameters) {
+        if (node instanceof SqlLambda) {
+            final SqlLambda lambda = (SqlLambda) node;
+            final Set<String> nested = new HashSet<>(lambdaParameters);
+            lambda.getParameters().forEach(parameter -> nested.add(parameter.toString()));
+            validateLambdaBody(lambda.getExpression(), nested);
+            return;
+        }
+        if (node instanceof SqlNodeList) {
+            for (SqlNode child : (SqlNodeList) node) {
+                if (child != null) {
+                    validateLambdaBody(child, lambdaParameters);
+                }
+            }
+            return;
+        }
+        if (!(node instanceof SqlCall)) {
+            return;
+        }
+        final SqlCall call = (SqlCall) node;
+        final SqlOperator operator = call.getOperator();
+        if (operator instanceof SqlTableFunction) {
+            throw newValidationError(
+                    call, EXTRA_RESOURCE.unsupportedInLambdaBody("Table functions"));
+        }
+        if (ShortcutUtils.isFunctionKind(operator, FunctionKind.ASYNC_SCALAR)) {
+            throw newValidationError(
+                    call, EXTRA_RESOURCE.unsupportedInLambdaBody("Asynchronous scalar functions"));
+        }
+        if (isPythonScalarFunction(operator)) {
+            throw newValidationError(
+                    call, EXTRA_RESOURCE.unsupportedInLambdaBody("Python scalar functions"));
+        }
+        // A quantified comparison (IN, EXISTS, ...) counts as a sub-query construct even though the
+        // operator itself is not of a QUERY kind: its left-hand side is a sibling of the query, so
+        // "x IN (SELECT ...)" references the lambda parameter outside the query the walk below
+        // would otherwise reach.
+        final boolean isQuery =
+                call instanceof SqlSelect
+                        || call.getKind().belongsTo(SqlKind.QUERY)
+                        || QUERY_CONSTRUCTS_IN_LAMBDA_BODY.contains(call.getKind());
+        final String construct;
+        if (call.getKind() == SqlKind.OVER) {
+            construct = "OVER windows";
+        } else if (operator.isAggregator()) {
+            construct = "Aggregate functions";
+        } else if (isQuery) {
+            construct = "Subqueries";
+        } else {
+            construct = null;
+        }
+        if (construct != null) {
+            final String captured = findLambdaParameterReference(call, lambdaParameters);
+            if (captured != null) {
+                throw newValidationError(
+                        call,
+                        EXTRA_RESOURCE.unsupportedOverLambdaParameterInLambdaBody(
+                                construct, captured));
+            }
+        }
+        if (isQuery) {
+            return;
+        }
+        for (SqlNode operand : call.getOperandList()) {
+            if (operand != null) {
+                validateLambdaBody(operand, lambdaParameters);
+            }
+        }
+    }
+
+    /**
+     * Returns the name of the first lambda parameter referenced anywhere below {@code node}, or
+     * null if it references none. An identifier references the parameter its first component names,
+     * e.g. {@code r.amount} references {@code r}. A lambda nested below {@code node} shadows the
+     * parameters it redeclares, and its own parameters do not count: they are bound within it.
+     */
+    private static @Nullable String findLambdaParameterReference(
+            SqlNode node, Set<String> lambdaParameters) {
+        if (lambdaParameters.isEmpty()) {
+            return null;
+        }
+        if (node instanceof SqlIdentifier) {
+            final String name = ((SqlIdentifier) node).names.get(0);
+            return lambdaParameters.contains(name) ? name : null;
+        }
+        if (node instanceof SqlLambda) {
+            final SqlLambda lambda = (SqlLambda) node;
+            final Set<String> shadowed = new HashSet<>(lambdaParameters);
+            lambda.getParameters().forEach(parameter -> shadowed.remove(parameter.toString()));
+            return findLambdaParameterReference(lambda.getExpression(), shadowed);
+        }
+        final List<SqlNode> children;
+        if (node instanceof SqlNodeList) {
+            children = ((SqlNodeList) node).getList();
+        } else if (node instanceof SqlCall) {
+            children = ((SqlCall) node).getOperandList();
+        } else {
+            return null;
+        }
+        for (SqlNode child : children) {
+            if (child != null) {
+                final String found = findLambdaParameterReference(child, lambdaParameters);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
 
     @Override
@@ -322,7 +590,7 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
     }
 
     private SqlToRelConverter createSqlToRelConverter() {
-        return new SqlToRelConverter(
+        return new FlinkSqlToRelConverter(
                 toRelContext,
                 this,
                 this.getCatalogReader().unwrap(CalciteCatalogReader.class),
