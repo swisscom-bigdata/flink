@@ -46,6 +46,10 @@ public class CalcBatchRestoreTest extends BatchRestoreTestBase {
                 CalcTestPrograms.CALC_ARRAY_FILTER,
                 CalcTestPrograms.CALC_ARRAY_REDUCE,
                 CalcTestPrograms.CALC_ARRAY_ZIP_WITH,
+                CalcTestPrograms.CALC_MAP_FILTER,
+                CalcTestPrograms.CALC_MAP_TRANSFORM_KEYS,
+                CalcTestPrograms.CALC_MAP_TRANSFORM_VALUES,
+                CalcTestPrograms.CALC_MAP_ZIP_WITH,
                 CalcTestPrograms.CALC_ARRAY_TRANSFORM_CAPTURE);
     }
 }
