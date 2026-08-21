@@ -19,8 +19,10 @@
 package org.apache.flink.table.types.inference;
 
 import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.types.DataType;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
@@ -41,9 +43,14 @@ import java.util.Optional;
  * #getExpectedLambdaParameterTypes} states what its parameters are bound to. The built-in
  * higher-order functions declare their signatures the same way.
  *
- * <p>Lambda arguments are currently only supported by built-in functions. A user-defined function
- * whose input type strategy implements this interface is rejected during validation, in SQL as well
- * as in the Table API.
+ * <p>Only {@link #getExpectedLambdaParameterTypes} is abstract. The methods inherited from {@link
+ * InputTypeStrategy} accept any arguments and return their types unchanged by default. A scalar or
+ * table function usually overrides them to validate the sibling arguments of its lambda. A {@link
+ * org.apache.flink.table.functions.ProcessTableFunction}, which must declare a static signature,
+ * additionally declares the lambda argument there as a {@link StaticArgument#scalar scalar
+ * argument} of type {@code FUNCTION(n)}. The static signature then already declares and validates
+ * every argument, so the defaults are what the function needs, and the strategy can be written as a
+ * lambda that only derives the parameter types.
  *
  * <p><b>Contract of the function object received at runtime</b>
  *
@@ -93,8 +100,9 @@ import java.util.Optional;
  *       it then is undefined behavior, not a supported mode. Consequently, {@link
  *       org.apache.flink.table.functions.AsyncScalarFunction} and {@link
  *       org.apache.flink.table.functions.AsyncTableFunction} cannot declare a lambda argument; only
- *       {@link org.apache.flink.table.functions.ScalarFunction} and {@link
- *       org.apache.flink.table.functions.TableFunction} can.
+ *       {@link org.apache.flink.table.functions.ScalarFunction}, {@link
+ *       org.apache.flink.table.functions.TableFunction}, and {@link
+ *       org.apache.flink.table.functions.ProcessTableFunction} can.
  *   <li><b>Exceptions</b>: an unchecked exception ({@link RuntimeException} or {@link Error})
  *       raised while the body is evaluated propagates out of {@code apply} unchanged, exactly as it
  *       does for a built-in higher-order function, which evaluates its body the same way. Only a
@@ -114,6 +122,7 @@ import java.util.Optional;
  * </ul>
  */
 @PublicEvolving
+@FunctionalInterface
 public interface LambdaInputTypeStrategy extends InputTypeStrategy {
 
     /**
@@ -135,4 +144,26 @@ public interface LambdaInputTypeStrategy extends InputTypeStrategy {
      */
     Optional<List<DataType>> getExpectedLambdaParameterTypes(
             CallContext callContext, int argumentPos);
+
+    /** Accepts any number of arguments by default. */
+    @Override
+    default ArgumentCount getArgumentCount() {
+        return ConstantArgumentCount.any();
+    }
+
+    /**
+     * Returns the argument types unchanged by default, which leaves the lambda argument uncast as
+     * required and performs no validation.
+     */
+    @Override
+    default Optional<List<DataType>> inferInputTypes(
+            CallContext callContext, boolean throwOnFailure) {
+        return Optional.of(callContext.getArgumentDataTypes());
+    }
+
+    /** Returns a single wildcard signature {@code f(*)} by default. */
+    @Override
+    default List<Signature> getExpectedSignatures(FunctionDefinition definition) {
+        return Collections.singletonList(Signature.of(Signature.Argument.of("*")));
+    }
 }

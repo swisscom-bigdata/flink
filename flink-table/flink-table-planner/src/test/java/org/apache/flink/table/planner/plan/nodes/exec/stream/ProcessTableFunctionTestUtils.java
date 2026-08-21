@@ -39,14 +39,18 @@ import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.functions.TableSemantics;
 import org.apache.flink.table.runtime.operators.process.AbstractProcessTableOperator.RunnerContext;
 import org.apache.flink.table.test.program.SourceTestStep;
+import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.inference.LambdaInputTypeStrategy;
 import org.apache.flink.table.types.inference.StateTypeStrategy;
 import org.apache.flink.table.types.inference.StaticArgument;
 import org.apache.flink.table.types.inference.StaticArgumentTrait;
 import org.apache.flink.table.types.inference.TypeInference;
+import org.apache.flink.table.types.inference.TypeStrategies;
 import org.apache.flink.types.ColumnList;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.types.variant.Variant;
+import org.apache.flink.util.function.Function2;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -568,6 +572,56 @@ public class ProcessTableFunctionTestUtils {
             }
             s1.setField("i", i + 1);
             s2.setField("s", i.toString());
+        }
+    }
+
+    /**
+     * Testing function. Folds the 'score' column of a partition with its lambda argument and keeps
+     * the running result in state; the lambda's parameter types are derived from that column.
+     */
+    public static class LambdaFoldFunction extends AppendProcessTableFunctionBase {
+        public void eval(Row s, Row r, Function2<Integer, Integer, Integer> combine) {
+            final Integer acc = s.getFieldAs("acc");
+            final Integer score = r.getFieldAs("score");
+            final Integer folded = acc == null ? score : combine.apply(acc, score);
+            s.setField("acc", folded);
+            collectObjects(acc, folded);
+        }
+
+        @Override
+        public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+            final LinkedHashMap<String, StateTypeStrategy> stateTypeStrategies =
+                    new LinkedHashMap<>();
+            stateTypeStrategies.put(
+                    "s",
+                    StateTypeStrategy.of(
+                            TypeStrategies.explicit(
+                                    DataTypes.ROW(DataTypes.FIELD("acc", DataTypes.INT())))));
+            final LambdaInputTypeStrategy lambdaStrategy =
+                    (callContext, argumentPos) -> {
+                        if (argumentPos != 1) {
+                            return Optional.empty();
+                        }
+                        final DataType tableType = callContext.getArgumentDataTypes().get(0);
+                        final DataType scoreType =
+                                DataType.getFieldDataTypes(tableType)
+                                        .get(DataType.getFieldNames(tableType).indexOf("score"));
+                        return Optional.of(List.of(scoreType, scoreType));
+                    };
+            return TypeInference.newBuilder()
+                    .staticArguments(
+                            StaticArgument.table(
+                                    "r",
+                                    Row.class,
+                                    false,
+                                    EnumSet.of(StaticArgumentTrait.SET_SEMANTIC_TABLE)),
+                            StaticArgument.scalar("combine", DataTypes.FUNCTION(2), false))
+                    .stateTypeStrategies(stateTypeStrategies)
+                    .inputTypeStrategy(lambdaStrategy)
+                    .outputTypeStrategy(
+                            TypeStrategies.explicit(
+                                    DataTypes.ROW(DataTypes.FIELD("out", DataTypes.STRING()))))
+                    .build();
         }
     }
 
