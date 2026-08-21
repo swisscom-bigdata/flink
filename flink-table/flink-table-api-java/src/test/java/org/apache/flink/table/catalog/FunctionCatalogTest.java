@@ -33,6 +33,8 @@ import org.apache.flink.table.utils.CatalogManagerMocks;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URL;
 import java.util.Collections;
@@ -176,6 +178,52 @@ class FunctionCatalogTest {
         assertThat(functionCatalog.lookupFunction(PARTIAL_UNRESOLVED_IDENTIFIER))
                 .hasValue(
                         ContextResolvedFunction.temporary(FunctionIdentifier.of(NAME), FUNCTION_4));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ARRAY_TRANSFORM", "ARRAY_FILTER", "ARRAY_REDUCE", "ARRAY_ZIP_WITH"})
+    void testBuiltInHigherOrderFunctionNameCollision(String builtInName) throws Exception {
+        // Regression guard for FLINK-31207: the new higher-order built-ins become reserved
+        // system-function names. This pins the resolution precedence the FLIP
+        // compatibility/migration guidance relies on, for each of the eight names.
+        final FunctionDefinition builtIn =
+                moduleManager.getFunctionDefinition(builtInName).orElseThrow(AssertionError::new);
+
+        final ObjectIdentifier catalogId =
+                ObjectIdentifier.of(DEFAULT_CATALOG, DEFAULT_DATABASE, builtInName);
+        final CatalogFunctionImpl catalogFunction =
+                new CatalogFunctionImpl(FUNCTION_1.getClass().getName());
+        catalog.createFunction(catalogId.toObjectPath(), catalogFunction, false);
+
+        // 1. An unqualified call collides with the built-in, which takes precedence over the
+        // catalog function.
+        assertThat(functionCatalog.lookupFunction(UnresolvedIdentifier.of(builtInName)))
+                .hasValueSatisfying(
+                        resolved -> assertThat(resolved.getDefinition()).isSameAs(builtIn));
+
+        // 2. A fully qualified identifier bypasses built-in resolution and finds the catalog UDF.
+        assertThat(
+                        functionCatalog.lookupFunction(
+                                UnresolvedIdentifier.of(
+                                        DEFAULT_CATALOG, DEFAULT_DATABASE, builtInName)))
+                .hasValue(
+                        ContextResolvedFunction.permanent(
+                                FunctionIdentifier.of(catalogId), FUNCTION_1, catalogFunction));
+
+        // 3. A temporary catalog function with the same name is still shadowed by the built-in for
+        // unqualified calls.
+        functionCatalog.registerTemporaryCatalogFunction(
+                UnresolvedIdentifier.of(builtInName), FUNCTION_2, false);
+        assertThat(functionCatalog.lookupFunction(UnresolvedIdentifier.of(builtInName)))
+                .hasValueSatisfying(
+                        resolved -> assertThat(resolved.getDefinition()).isSameAs(builtIn));
+
+        // 4. A temporary system function overrides the built-in (documented migration path).
+        functionCatalog.registerTemporarySystemFunction(builtInName, FUNCTION_4, false);
+        assertThat(functionCatalog.lookupFunction(UnresolvedIdentifier.of(builtInName)))
+                .hasValue(
+                        ContextResolvedFunction.temporary(
+                                FunctionIdentifier.of(builtInName), FUNCTION_4));
     }
 
     @Test

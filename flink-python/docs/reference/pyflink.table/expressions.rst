@@ -268,6 +268,10 @@ advanced type helper functions
     Expression.map_values
     Expression.array_except
     Expression.array_intersect
+    Expression.array_transform
+    Expression.array_filter
+    Expression.array_reduce
+    Expression.array_zip_with
     Expression.split
 
 

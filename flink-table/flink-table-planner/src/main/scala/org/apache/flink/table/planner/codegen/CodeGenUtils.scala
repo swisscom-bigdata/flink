@@ -283,6 +283,7 @@ object CodeGenUtils {
     case DESCRIPTOR => className[ColumnList]
     case VARIANT => className[Variant]
     case BITMAP => className[Bitmap]
+    case FUNCTION => classOf[java.util.function.Function[_, _]].getCanonicalName
     case SYMBOL | UNRESOLVED =>
       throw new IllegalArgumentException("Illegal type: " + t)
   }

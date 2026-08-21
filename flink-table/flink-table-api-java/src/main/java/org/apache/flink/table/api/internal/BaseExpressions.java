@@ -34,10 +34,13 @@ import org.apache.flink.table.expressions.TimeIntervalUnit;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.UnresolvedDataType;
+import org.apache.flink.util.function.Function1;
+import org.apache.flink.util.function.Function2;
 
 import java.util.Arrays;
 import java.util.stream.Stream;
 
+import static org.apache.flink.table.api.internal.HigherOrderFunctionCalls.lambdaCall;
 import static org.apache.flink.table.expressions.ApiExpressionUtils.MILLIS_PER_DAY;
 import static org.apache.flink.table.expressions.ApiExpressionUtils.MILLIS_PER_HOUR;
 import static org.apache.flink.table.expressions.ApiExpressionUtils.MILLIS_PER_MINUTE;
@@ -60,15 +63,19 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_DISTINCT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_ELEMENT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_EXCEPT;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_FILTER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_INTERSECT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_MAX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_MIN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_POSITION;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_PREPEND;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REDUCE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REMOVE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REVERSE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_SLICE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_TRANSFORM;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_UNION;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_ZIP_WITH;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASCII;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASIN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.AT;
@@ -338,6 +345,41 @@ public abstract class BaseExpressions<InType, OutType> {
     public OutType arrayIntersect(InType array) {
         return toApiSpecificExpression(
                 unresolvedCall(ARRAY_INTERSECT, toExpr(), objectToExpression(array)));
+    }
+
+    /**
+     * Returns a new array by applying the given lambda to each element, preserving the order.
+     * Returns {@code NULL} for a {@code NULL} input array.
+     */
+    public OutType arrayTransform(Function1<OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_TRANSFORM, lambdaFunction);
+    }
+
+    /**
+     * Returns a new array with only the elements for which the given predicate lambda returns
+     * {@code TRUE}. Returns {@code NULL} for a {@code NULL} input array.
+     */
+    public OutType arrayFilter(Function1<OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_FILTER, lambdaFunction);
+    }
+
+    /**
+     * Applies a left fold to the input array: the merge lambda {@code (acc, element)} is applied to
+     * each element in order, starting from {@code initialValue} which is returned for empty arrays.
+     * Returns {@code NULL} for a {@code NULL} input array.
+     */
+    public OutType arrayReduce(
+            InType initialValue, Function2<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_REDUCE, lambdaFunction, objectToExpression(initialValue));
+    }
+
+    /**
+     * Combines this array and {@code array} element-wise by applying the given lambda to the pair
+     * at each position. The shorter array is padded with {@code NULL}. Returns {@code NULL} if
+     * either array is {@code NULL}.
+     */
+    public OutType arrayZipWith(InType array, Function2<OutType, OutType, OutType> lambdaFunction) {
+        return lambdaCall(this, ARRAY_ZIP_WITH, lambdaFunction, objectToExpression(array));
     }
 
     /**

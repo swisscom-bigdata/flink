@@ -64,6 +64,7 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.StructKind;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlIntervalQualifier;
@@ -95,12 +96,15 @@ import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
 
 import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
+import static org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil.CAPTURE_PARAM_INDEX_BASE;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.CompiledPlanSerdeUtil.createJsonObjectReader;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.CompiledPlanSerdeUtil.createJsonObjectWriter;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.assertThatJsonContains;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.assertThatJsonDoesNotContain;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.configuredSerdeContext;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.testJsonRoundTrip;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.toJson;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeTestUtil.toObject;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_CLASS;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_CATALOG;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_DATABASE;
@@ -335,6 +339,96 @@ public class RexNodeJsonSerdeTest {
                         anyCauseMatches(
                                 TableException.class,
                                 "Functions of the deprecated function stack are not supported."));
+    }
+
+    /**
+     * A {@link RexLambdaRef} is positional, so a compiled plan whose lambda no longer satisfies the
+     * closed-lambda invariant that capture lifting establishes when the plan is written would bind
+     * a body reference to the wrong parameter. Restoring such a plan must fail instead.
+     */
+    @Test
+    public void testInvalidLambdaInCompiledPlan() throws IOException {
+        final SerdeContext serdeContext = configuredSerdeContext();
+
+        // control: the identity lambda `x -> x` deserializes
+        assertThat(
+                        toObject(
+                                serdeContext,
+                                lambdaJson(
+                                        lambdaRefJson("x", 0, "INT"), lambdaRefJson("x", 0, "INT")),
+                                RexNode.class))
+                .hasToString("(x) -> x");
+
+        // the body references a parameter that does not exist
+        assertThatThrownBy(
+                        () ->
+                                toObject(
+                                        serdeContext,
+                                        lambdaJson(
+                                                lambdaRefJson("x", 0, "INT"),
+                                                lambdaRefJson("y", 1, "INT")),
+                                        RexNode.class))
+                .satisfies(
+                        anyCauseMatches(
+                                TableException.class,
+                                "Invalid lambda expression in the compiled plan"));
+
+        // the parameters are not in 0-based positional form
+        assertThatThrownBy(
+                        () ->
+                                toObject(
+                                        serdeContext,
+                                        lambdaJson(
+                                                lambdaRefJson("x", 1, "INT"),
+                                                lambdaRefJson("x", 1, "INT")),
+                                        RexNode.class))
+                .satisfies(
+                        anyCauseMatches(
+                                TableException.class,
+                                "Invalid lambda expression in the compiled plan"));
+
+        // the body references parameter #0 under a different name than the plan declares for it
+        assertThatThrownBy(
+                        () ->
+                                toObject(
+                                        serdeContext,
+                                        lambdaJson(
+                                                lambdaRefJson("x", 0, "INT"),
+                                                lambdaRefJson("y", 0, "INT")),
+                                        RexNode.class))
+                .satisfies(
+                        anyCauseMatches(
+                                TableException.class,
+                                "Lambda parameter #0 is declared as 'x' of type INTEGER in the "
+                                        + "compiled plan but referenced as 'y' of type INTEGER in "
+                                        + "the lambda body"));
+
+        // ... or with a different type
+        assertThatThrownBy(
+                        () ->
+                                toObject(
+                                        serdeContext,
+                                        lambdaJson(
+                                                lambdaRefJson("x", 0, "INT"),
+                                                lambdaRefJson("x", 0, "BIGINT")),
+                                        RexNode.class))
+                .satisfies(
+                        anyCauseMatches(
+                                TableException.class,
+                                "Lambda parameter #0 is declared as 'x' of type INTEGER in the "
+                                        + "compiled plan but referenced as 'x' of type BIGINT in "
+                                        + "the lambda body"));
+    }
+
+    private static String lambdaJson(String parameterJson, String bodyJson) {
+        return String.format(
+                "{\"kind\":\"LAMBDA\",\"parameters\":[%s],\"expr\":%s}", parameterJson, bodyJson);
+    }
+
+    private static String lambdaRefJson(String name, int index, String type) {
+        return String.format(
+                "{\"kind\":\"LAMBDA_REF\",\"name\":\"%s\",\"index\":%d,\"type\":\"%s\"}",
+                name, index, type);
     }
 
     @Nested
@@ -707,7 +801,30 @@ public class RexNodeJsonSerdeTest {
                                         Arrays.asList("n1", "n2"))),
                         Arrays.asList("f1", "f2", "f3"));
 
+        // Lambda argument of a higher-order function: x -> x + 1
+        final RelDataType lambdaParamType = FACTORY.createSqlType(SqlTypeName.INTEGER);
+        final RexLambdaRef lambdaParam = new RexLambdaRef(0, "x", lambdaParamType);
+        final RexNode lambdaBody =
+                rexBuilder.makeCall(
+                        SqlStdOperatorTable.PLUS,
+                        lambdaParam,
+                        rexBuilder.makeExactLiteral(BigDecimal.ONE, lambdaParamType));
+        final RexNode lambda = rexBuilder.makeLambdaCall(lambdaBody, List.of(lambdaParam));
+
+        // Lambda whose captured value has been lifted into a trailing parameter, as produced by
+        // HigherOrderFunctionUtil#liftCaptures: (x, cap$0) -> x + cap$0
+        final RexLambdaRef captureParam =
+                new RexLambdaRef(CAPTURE_PARAM_INDEX_BASE, "cap$0", lambdaParamType);
+        final RexNode capturingLambda =
+                rexBuilder.makeLambdaCall(
+                        rexBuilder.makeCall(SqlStdOperatorTable.PLUS, lambdaParam, captureParam),
+                        List.of(lambdaParam, captureParam));
+
         return Stream.of(
+                lambda,
+                lambdaParam,
+                capturingLambda,
+                captureParam,
                 rexBuilder.makeNullLiteral(FACTORY.createSqlType(SqlTypeName.VARCHAR)),
                 rexBuilder.makeLiteral(true),
                 rexBuilder.makeExactLiteral(

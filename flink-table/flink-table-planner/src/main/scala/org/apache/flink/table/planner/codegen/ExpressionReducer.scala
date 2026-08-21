@@ -333,4 +333,10 @@ class ConstantCodeGeneratorContext(tableConfig: ReadableConfig, classLoader: Cla
   override def addReusableConverter(dataType: DataType, classLoaderTerm: String = null): String = {
     super.addReusableConverter(dataType, "this.getClass().getClassLoader()")
   }
+
+  // The generated function runs in the planner (expression reduction, partition pruning) and thus
+  // has no runtime context.
+  override def functionContextCode(): String =
+    s"new ${classOf[FunctionContext].getCanonicalName}(" +
+      "null, this.getClass().getClassLoader(), openContext)"
 }

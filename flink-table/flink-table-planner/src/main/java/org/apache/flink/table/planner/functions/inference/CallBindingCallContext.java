@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.functions.inference;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.connector.ChangelogMode;
@@ -29,6 +30,7 @@ import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.calcite.RexTableArgCall;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.LambdaInfo;
 import org.apache.flink.table.types.inference.StaticArgument;
 import org.apache.flink.table.types.inference.StaticArgumentTrait;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -40,11 +42,13 @@ import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLambda;
 import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlModelCall;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlUtil;
+import org.apache.calcite.sql.type.FunctionSqlType;
 import org.apache.calcite.sql.type.SqlTypeName;
 
 import javax.annotation.Nullable;
@@ -65,6 +69,7 @@ import java.util.stream.Collectors;
 @Internal
 public final class CallBindingCallContext extends AbstractSqlCallContext {
 
+    private final SqlCallBinding binding;
     private final List<SqlNode> adaptedArguments;
     private final List<DataType> argumentDataTypes;
     private final Function<Integer, DataType> getModelInputType;
@@ -82,6 +87,7 @@ public final class CallBindingCallContext extends AbstractSqlCallContext {
                 definition,
                 binding.getOperator().getNameAsId().toString(),
                 binding.getGroupCount() > 0);
+        this.binding = binding;
         this.adaptedArguments = binding.operands(); // reorders the operands
         this.argumentDataTypes =
                 new AbstractList<>() {
@@ -199,6 +205,35 @@ public final class CallBindingCallContext extends AbstractSqlCallContext {
     @Override
     public List<DataType> getArgumentDataTypes() {
         return argumentDataTypes;
+    }
+
+    @Override
+    public Optional<LambdaInfo> getLambdaArgument(int pos) {
+        final SqlNode sqlNode = adaptedArguments.get(pos);
+        if (!(sqlNode instanceof SqlLambda)) {
+            return Optional.empty();
+        }
+        final RelDataType lambdaType = binding.getOperandType(pos);
+        if (!(lambdaType instanceof FunctionSqlType)) {
+            return Optional.empty();
+        }
+        final FunctionSqlType functionType = (FunctionSqlType) lambdaType;
+        final List<DataTypes.Field> parameterFields =
+                functionType.getParameterTypes().getFieldList().stream()
+                        .map(
+                                field ->
+                                        DataTypes.FIELD(
+                                                field.getName(),
+                                                TypeConversions.fromLogicalToDataType(
+                                                        FlinkTypeFactory.toLogicalType(
+                                                                field.getType()))))
+                        .collect(Collectors.toList());
+        final DataType returnDataType =
+                TypeConversions.fromLogicalToDataType(
+                        FlinkTypeFactory.toLogicalType(functionType.getReturnType()));
+        // The body is not available during type inference; only the parameter fields and result
+        // type are needed here (e.g. for a UDF's output type strategy).
+        return Optional.of(new LambdaInfo(null, parameterFields, returnDataType));
     }
 
     @Override

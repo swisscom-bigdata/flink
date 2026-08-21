@@ -30,4 +30,25 @@ public interface ExtraCalciteResource {
             "No match found for function signature {0}.\nSupported signatures are:\n{1}")
     Resources.ExInst<SqlValidatorException> validatorNoFunctionMatch(
             String invocation, String allowedSignatures);
+
+    @Resources.BaseMessage(
+            "Lambda parameter name ''{0}'' is not allowed: names beginning with ''{1}'' are reserved.")
+    Resources.ExInst<SqlValidatorException> reservedLambdaParameterName(String name, String prefix);
+
+    @Resources.BaseMessage(
+            "Duplicate lambda parameter name ''{0}''. The parameters of a lambda expression must "
+                    + "have unique names.")
+    Resources.ExInst<SqlValidatorException> duplicateLambdaParameterName(String name);
+
+    @Resources.BaseMessage(
+            "{0} are not supported in the body of a lambda expression. A lambda body must be a "
+                    + "scalar expression over its parameters and the columns it captures.")
+    Resources.ExInst<SqlValidatorException> unsupportedInLambdaBody(String construct);
+
+    @Resources.BaseMessage(
+            "{0} over a lambda parameter are not supported in the body of a lambda expression. "
+                    + "''{1}'' is a lambda parameter, which exists per element and has no group to "
+                    + "be evaluated over; only the columns of the enclosing query can be used here.")
+    Resources.ExInst<SqlValidatorException> unsupportedOverLambdaParameterInLambdaBody(
+            String construct, String parameter);
 }

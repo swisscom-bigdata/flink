@@ -16,7 +16,7 @@
 # limitations under the License.
 ################################################################################
 from enum import Enum
-from typing import Union, TypeVar, Generic, Any
+from typing import Union, TypeVar, Generic, Any, Callable
 
 from pyflink import add_version_doc
 from pyflink.java_gateway import get_gateway
@@ -314,6 +314,40 @@ def _expressions_op(op_name: str):
         return getattr(expressions, op_name)(self, *[_get_java_expression(arg) for arg in args])
 
     return _
+
+
+class _LambdaFunction1(object):
+    """
+    Adapts a single-parameter Python lambda to a Java ``org.apache.flink.util.function.Function1``
+    so that it can be passed to the higher-order function DSL methods (e.g. ``arrayTransform``). The
+    Java side calls :func:`apply` with the Java expression for the lambda parameter and expects the
+    Java expression of the body in return.
+    """
+
+    def __init__(self, func):
+        self._func = func
+
+    def apply(self, j_expr):
+        return _get_java_expression(self._func(Expression(j_expr)))
+
+    class Java:
+        implements = ["org.apache.flink.util.function.Function1"]
+
+
+class _LambdaFunction2(object):
+    """
+    Adapts a two-parameter Python lambda to a Java ``org.apache.flink.util.function.Function2``
+    (e.g. for ``arrayReduce``).
+    """
+
+    def __init__(self, func):
+        self._func = func
+
+    def apply(self, j_expr1, j_expr2):
+        return _get_java_expression(self._func(Expression(j_expr1), Expression(j_expr2)))
+
+    class Java:
+        implements = ["org.apache.flink.util.function.Function2"]
 
 
 class TimeIntervalUnit(Enum):
@@ -2013,6 +2047,70 @@ class Expression(Generic[T]):
         The order of the elements from array1 is kept.
         """
         return _binary_op("arrayIntersect")(self, array)
+
+    def array_transform(self, transformation: Callable[['Expression'], 'Expression']) \
+            -> 'Expression':
+        """
+        Returns a new array by applying ``transformation`` to each element of the input array. The
+        result element type is the type of the transformed element and the order of the elements is
+        preserved. If the input array is NULL, the function returns NULL.
+
+        Example:
+        ::
+
+            >>> col("array_col").array_transform(lambda x: x + 1)
+        """
+        return Expression(self._j_expr.arrayTransform(_LambdaFunction1(transformation)))
+
+    def array_filter(self, predicate: Callable[['Expression'], 'Expression']) -> 'Expression':
+        """
+        Returns a new array containing only the elements of the input array for which ``predicate``
+        returns TRUE. A FALSE or NULL predicate result excludes the element. If the input array is
+        NULL, the function returns NULL.
+
+        Example:
+        ::
+
+            >>> col("array_col").array_filter(lambda x: x > 1)
+        """
+        return Expression(self._j_expr.arrayFilter(_LambdaFunction1(predicate)))
+
+    def array_reduce(
+            self,
+            initial_value,
+            reducer: Callable[['Expression', 'Expression'], 'Expression']) -> 'Expression':
+        """
+        Applies a left fold to the input array: starting from ``initial_value``, the ``reducer``
+        ``(acc, element) -> acc`` is applied to each element in order and the final accumulator is
+        returned. If the input array is NULL, the function returns NULL. For an empty array the
+        initial accumulator is returned.
+
+        Example:
+        ::
+
+            >>> col("array_col").array_reduce(lit(0), lambda acc, x: acc + x)
+        """
+        return Expression(
+            self._j_expr.arrayReduce(_get_java_expression(initial_value),
+                                     _LambdaFunction2(reducer)))
+
+    def array_zip_with(
+            self,
+            array,
+            combiner: Callable[['Expression', 'Expression'], 'Expression']) -> 'Expression':
+        """
+        Combines this array and ``array`` element-wise by applying ``combiner`` ``(x, y) -> ...`` to
+        the pair at each position. The shorter array is padded with NULL to the length of the longer
+        one. If either array is NULL, the function returns NULL.
+
+        Example:
+        ::
+
+            >>> col("array_col").array_zip_with(col("other_col"), lambda x, y: x + y)
+        """
+        return Expression(
+            self._j_expr.arrayZipWith(_get_java_expression(array),
+                                      _LambdaFunction2(combiner)))
 
     def split(self, delimiter) -> 'Expression':
         """

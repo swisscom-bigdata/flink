@@ -19,11 +19,20 @@
 package org.apache.flink.table.types.inference;
 
 import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.functions.FunctionDefinition;
+import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.strategies.SubsequenceInputTypeStrategy;
+import org.apache.flink.table.types.inference.utils.CallContextMock;
 import org.apache.flink.table.types.logical.LogicalTypeFamily;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.apache.flink.table.types.inference.InputTypeStrategies.ANY;
@@ -32,6 +41,7 @@ import static org.apache.flink.table.types.inference.InputTypeStrategies.explici
 import static org.apache.flink.table.types.inference.InputTypeStrategies.logical;
 import static org.apache.flink.table.types.inference.InputTypeStrategies.sequence;
 import static org.apache.flink.table.types.inference.InputTypeStrategies.varyingSequence;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests for {@link SubsequenceInputTypeStrategy}. */
 class SubsequenceInputTypeStrategyTest extends InputTypeStrategiesTestBase {
@@ -144,5 +154,72 @@ class SubsequenceInputTypeStrategyTest extends InputTypeStrategiesTestBase {
                                 DataTypes.SMALLINT(),
                                 DataTypes.BIGINT(),
                                 DataTypes.INT()));
+    }
+
+    /**
+     * A split shifts every per-argument accessor of the {@link CallContext} it hands to a nested
+     * strategy, including {@link CallContext#getLambdaArgument(int)}. No built-in combines {@code
+     * compositeSequence()} with a lambda argument yet, so this pins the shift before one does -- an
+     * unshifted position would read the lambda of a different argument.
+     */
+    @Test
+    void testLambdaArgumentPositionIsShifted() {
+        final LambdaInfo lambdaInfo =
+                new LambdaInfo(
+                        null,
+                        Collections.singletonList(DataTypes.FIELD("x", DataTypes.INT())),
+                        DataTypes.BIGINT());
+
+        final CallContextMock callContext = new CallContextMock();
+        callContext.name = "f";
+        callContext.argumentDataTypes =
+                Arrays.asList(
+                        DataTypes.BOOLEAN(),
+                        DataTypes.ARRAY(DataTypes.INT()),
+                        DataTypes.FUNCTION(1));
+        callContext.outputDataType = Optional.empty();
+        callContext.lambdaArguments = Collections.singletonMap(2, lambdaInfo);
+
+        final CapturingInputTypeStrategy capturing = new CapturingInputTypeStrategy();
+        InputTypeStrategies.compositeSequence()
+                .argument(logical(LogicalTypeRoot.BOOLEAN))
+                .subsequence(capturing)
+                .finish()
+                .inferInputTypes(callContext, false);
+
+        // the split starts at 1, so the lambda at absolute position 2 is seen at position 1
+        assertThat(capturing.lambdaArguments)
+                .containsExactly(Optional.empty(), Optional.of(lambdaInfo));
+    }
+
+    /**
+     * An {@link InputTypeStrategy} for two arguments that records the {@link
+     * CallContext#getLambdaArgument(int)} of every argument it is given.
+     */
+    private static class CapturingInputTypeStrategy implements InputTypeStrategy {
+
+        private static final int ARGUMENT_COUNT = 2;
+
+        private final List<Optional<LambdaInfo>> lambdaArguments = new ArrayList<>();
+
+        @Override
+        public ArgumentCount getArgumentCount() {
+            return ConstantArgumentCount.of(ARGUMENT_COUNT);
+        }
+
+        @Override
+        public Optional<List<DataType>> inferInputTypes(
+                CallContext callContext, boolean throwOnFailure) {
+            for (int pos = 0; pos < ARGUMENT_COUNT; pos++) {
+                lambdaArguments.add(callContext.getLambdaArgument(pos));
+            }
+            return Optional.of(callContext.getArgumentDataTypes());
+        }
+
+        @Override
+        public List<Signature> getExpectedSignatures(FunctionDefinition definition) {
+            return Collections.singletonList(
+                    Signature.of(Signature.Argument.of("ANY"), Signature.Argument.of("ANY")));
+        }
     }
 }
