@@ -764,6 +764,232 @@ class NamedParameterClass extends ScalarFunction {
 * Named parameters only take effect when the corresponding class does not contain overloaded functions and variable parameter functions, otherwise using named parameters will cause an error.
 {{< /hint >}}
 
+### Lambda Arguments
+
+A user-defined function can declare a *lambda* argument and thus become a higher-order function like
+the built-in [`ARRAY_TRANSFORM`, `MAP_FILTER` and friends]({{< ref "docs/sql/functions/built-in-functions" >}}#higher-order-functions).
+A call then passes a lambda expression for that argument:
+
+```sql
+SELECT my_array_transform(vals, x -> x + base) FROM t;
+```
+
+A lambda argument is declared by implementing `LambdaInputTypeStrategy` as the function's input type
+strategy. Implementing the interface is the declaration: a signature without a lambda argument must
+not implement it, because the interface alone is what lets a lambda argument be rejected for a
+function kind that does not support one. The interface extends `InputTypeStrategy` with one method
+that is consulted by both SQL and the Table API:
+
+* `getExpectedLambdaParameterTypes(callContext, argumentPos)` binds the parameter types of the lambda
+  at `argumentPos` from the sibling arguments of the call, which are already resolved at that point.
+  It returns an empty optional if the argument is not a lambda or the types cannot be derived. A
+  returned list must contain one, two, or three types; any other size is rejected with a
+  `ValidationException` on both surfaces.
+
+`inferInputTypes(...)` accepts the lambda argument like any other argument. Return its data type
+unchanged: a lambda is never cast, and only its runtime representation may be restated (see below).
+Because the result type of a lambda is only known after its body has been resolved, the output type
+strategy obtains it from `CallContext#getLambdaArgument(pos)`.
+
+At runtime the function receives the lambda as a plain function object, selected by the number of
+lambda parameters:
+
+| Lambda parameters | Object handed to `eval` |
+|---|---|
+| 1 | `java.util.function.Function` |
+| 2 | `java.util.function.BiFunction` |
+| 3 | `org.apache.flink.util.function.TriFunction` |
+
+The function calls `apply(...)` as often as it likes and owns its loop. The framework compiles the
+lambda body and binds any captured columns behind the object, so the function does not see them. The
+object is bound to the `eval` call that received it; see [The Lambda Object Contract](#the-lambda-object-contract)
+below for the rules that apply to it.
+
+{{< tabs "lambda-arguments" >}}
+{{< tab "Java" >}}
+```java
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.catalog.DataTypeFactory;
+import org.apache.flink.table.functions.FunctionDefinition;
+import org.apache.flink.table.functions.ScalarFunction;
+import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.inference.ArgumentCount;
+import org.apache.flink.table.types.inference.CallContext;
+import org.apache.flink.table.types.inference.ConstantArgumentCount;
+import org.apache.flink.table.types.inference.LambdaInputTypeStrategy;
+import org.apache.flink.table.types.inference.Signature;
+import org.apache.flink.table.types.inference.TypeInference;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+
+// a user-defined ARRAY_TRANSFORM: (ARRAY<E>, E -> R) -> ARRAY<R>
+public static class ArrayTransformFunction extends ScalarFunction {
+
+  public Integer[] eval(Integer[] array, Function<Integer, Integer> lambda) {
+    if (array == null) {
+      return null;
+    }
+    final Integer[] result = new Integer[array.length];
+    for (int i = 0; i < array.length; i++) {
+      result[i] = lambda.apply(array[i]);
+    }
+    return result;
+  }
+
+  @Override
+  public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+    return TypeInference.newBuilder()
+      .inputTypeStrategy(new ArrayTransformInputTypeStrategy())
+      .outputTypeStrategy(
+        callContext ->
+          Optional.of(
+            DataTypes.ARRAY(
+              callContext
+                .getLambdaArgument(1)
+                .orElseThrow(IllegalStateException::new)
+                .getReturnDataType())))
+      .build();
+  }
+}
+
+public static class ArrayTransformInputTypeStrategy implements LambdaInputTypeStrategy {
+
+  @Override
+  public ArgumentCount getArgumentCount() {
+    return ConstantArgumentCount.of(2);
+  }
+
+  @Override
+  public Optional<List<DataType>> getExpectedLambdaParameterTypes(
+      CallContext callContext, int argumentPos) {
+    if (argumentPos != 1) {
+      return Optional.empty();
+    }
+    // the lambda's single parameter is the element type of the array at argument 0
+    return Optional.of(
+      Collections.singletonList(callContext.getArgumentDataTypes().get(0).getChildren().get(0)));
+  }
+
+  @Override
+  public Optional<List<DataType>> inferInputTypes(CallContext callContext, boolean throwOnFailure) {
+    final List<DataType> args = callContext.getArgumentDataTypes();
+    if (args.size() != 2
+        || !args.get(0).getLogicalType().is(LogicalTypeRoot.ARRAY)
+        || !args.get(1).getLogicalType().is(LogicalTypeRoot.FUNCTION)) {
+      if (throwOnFailure) {
+        throw callContext.newValidationError("Expected an ARRAY and a lambda.");
+      }
+      return Optional.empty();
+    }
+    // returned unchanged so that the lambda argument is never cast
+    return Optional.of(args);
+  }
+
+  @Override
+  public List<Signature> getExpectedSignatures(FunctionDefinition definition) {
+    return Collections.singletonList(
+      Signature.of(Signature.Argument.of("ARRAY"), Signature.Argument.of("(x) -> y")));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+A function may declare more than one lambda argument; each is received as its own function object and
+evaluated independently. `getExpectedLambdaParameterTypes(...)` then returns a list for each of their
+positions.
+
+A lambda argument carries a `DataTypes.FUNCTION(parameterCount)` type internally, while its
+parameter types and result type are reached through `CallContext#getLambdaArgument(int)`. This
+`FUNCTION` type is a helper type for lambda arguments only: it cannot be a column type, a state
+type, or the return type of a function, and it is rejected with an error if used that way.
+
+The values a function exchanges with its lambda are the function's own, so a function that reads its
+arguments as internal data structures also receives its lambda in that representation:
+`FunctionData`, `BiFunctionData` and `TriFunctionData` instead of `Function`, `BiFunction` and
+`TriFunction`. It is declared on the argument, next to the representation of every other argument, by
+bridging the argument's type in `inferInputTypes(...)`:
+
+```java
+final List<DataType> args = callContext.getArgumentDataTypes();
+return Optional.of(
+  Arrays.asList(
+    DataTypes.ARRAY(DataTypes.STRING().bridgedTo(StringData.class)).bridgedTo(ArrayData.class),
+    args.get(1).bridgedTo(FunctionData.class)));
+```
+
+Such an object exchanges the internal representation of the lambda's parameter and result types.
+Leaving the lambda argument unbridged declares external classes and is the default. A declaration
+that does not match the `eval` method is rejected when the query is planned, not at runtime.
+
+#### The Lambda Object Contract
+
+The received function object is not an ordinary value. It is a handle on a framework-compiled
+expression that is bound to one invocation of `eval`. The normative version of the rules below is the
+Javadoc of `LambdaInputTypeStrategy`, the interface that declares the argument:
+
+* **Lifetime.** The object is valid only for the duration of the `eval` call it is passed to. It
+  must not be stored in a field, put into state, returned, handed to anything that outlives the
+  call, or serialized. Behaviour after `eval` returns is undefined and is not checked for: a
+  retained object stays technically callable, and applying it then is not a supported mode.
+* **Identity.** A fresh object is created for every evaluation of the enclosing call — per row, or
+  per element when the call itself sits in a lambda body — so its identity must not be used as a
+  cache key.
+* **Captures.** All captured values are evaluated before `eval` is entered and bound behind the
+  object, so every application within one `eval` call sees the same snapshot.
+* **Invocation.** The function owns its loop and may apply the object zero, one, or arbitrarily many
+  times, in any order. The framework never applies a lambda on the function's behalf, so a body is
+  evaluated only where the function applies it.
+* **Arguments and result.** `apply` may be called with `null` arguments and may return `null`
+  (SQL `NULL`). An external `Function`, `BiFunction` or `TriFunction` exchanges external values.
+  An internal `FunctionData`, `BiFunctionData` or `TriFunctionData` may return a mutable value backed
+  by evaluator-owned memory that the next application reuses. A function that retains or buffers
+  such an internal result across another application must deep-copy it first.
+* **Nesting.** Applications of different lambda objects may nest to any depth: a body may contain
+  another higher-order call whose function receives its own object. An object is never re-entered
+  from within its own body — SQL has no recursion — and a function must not construct such a call
+  itself.
+* **Thread affinity.** The object must be applied only from the thread that called `eval`, and only
+  while that call is on the stack. It is not thread-safe: applications must not overlap and the
+  object must not be handed to another thread, an executor, a parallel stream, or a
+  `CompletableFuture` callback. This is not enforced and cannot be probed: the compiled body is a
+  single instance shared by every object built at that call site, so a body that folds to plain
+  arithmetic may appear to tolerate concurrent applications while one that constructs a `ROW` or an
+  `ARRAY`, or calls another function, corrupts the reusable buffers behind it.
+* **Asynchronous functions.** `AsyncScalarFunction` and `AsyncTableFunction` cannot declare a lambda
+  argument; doing so is rejected with *"Lambda arguments are not supported for functions of kind
+  'ASYNC_SCALAR'"*. An asynchronous function completes its future after `eval` has returned, possibly
+  on another thread, which the two rules above forbid. A higher-order *call* remains usable as an
+  argument of an asynchronous function. Conversely, an `AsyncScalarFunction` cannot be called from a
+  lambda body: *"Asynchronous scalar functions are not supported in the body of a lambda
+  expression"*.
+* **Exceptions.** An unchecked exception thrown while the body is evaluated propagates out of
+  `apply` unchanged, exactly as it would from a built-in higher-order function given the same body.
+  Only a throwable that `apply` cannot declare leaves it as an
+  `org.apache.flink.util.FlinkRuntimeException` with the original error as its cause. Letting it
+  propagate is recommended; it then fails the task like any other function failure. Catching it is
+  allowed, but the application then yields no result, anything the body touched is left in an
+  unspecified state, and the enclosing call is not retried.
+* **`open` / `close`.** No lambda object exists in `open(FunctionContext)` or `close()`, and none
+  must be obtained or applied there. The framework owns the lifecycle of the compiled body: it is
+  initialized and cleaned up with the enclosing operator, and a function called *from* a body is
+  instantiated, opened and closed like one called anywhere else.
+* **Determinism.** The object is only as deterministic as the body the caller wrote, so applying the
+  same arguments twice does not necessarily yield the same result.
+
+{{< hint info >}}
+* Lambdas are only valid as arguments of higher-order functions, and a lambda argument must be
+  declared through the type inference stack — a plain `Function` parameter without a
+  `LambdaInputTypeStrategy` is not supported.
+* A lambda body may capture columns of the enclosing query and the parameters of enclosing lambdas,
+  as well as an aggregate, an `OVER` window or a sub-query of the enclosing query. Captures are
+  evaluated per row or group, before the function is called.
+{{< /hint >}}
+
 ### Determinism
 
 Every user-defined function class can declare whether it produces deterministic results or not by overriding

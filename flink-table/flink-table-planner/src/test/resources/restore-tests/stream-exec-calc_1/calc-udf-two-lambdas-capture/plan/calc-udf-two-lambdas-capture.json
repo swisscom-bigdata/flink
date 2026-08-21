@@ -1,0 +1,167 @@
+{
+  "flinkVersion" : "2.4",
+  "nodes" : [ {
+    "id" : 4,
+    "type" : "stream-exec-table-source-scan_2",
+    "scanTableSource" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`source_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "v",
+              "dataType" : "INT"
+            }, {
+              "name" : "b1",
+              "dataType" : "INT"
+            }, {
+              "name" : "b2",
+              "dataType" : "INT"
+            } ]
+          }
+        }
+      }
+    },
+    "outputType" : "ROW<`v` INT, `b1` INT, `b2` INT>",
+    "description" : "TableSourceScan(table=[[default_catalog, default_database, source_t]], fields=[v, b1, b2])"
+  }, {
+    "id" : 5,
+    "type" : "stream-exec-calc_1",
+    "projection" : [ {
+      "kind" : "CALL",
+      "systemName" : "my_two_lambdas",
+      "operands" : [ {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 0,
+        "type" : "INT"
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "x",
+          "index" : 0,
+          "type" : "INT"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "cap$1",
+          "index" : 1000000,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$+$1",
+          "operands" : [ {
+            "kind" : "LAMBDA_REF",
+            "name" : "x",
+            "index" : 0,
+            "type" : "INT"
+          }, {
+            "kind" : "LAMBDA_REF",
+            "name" : "cap$1",
+            "index" : 1000000,
+            "type" : "INT"
+          } ],
+          "type" : "INT"
+        }
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "x",
+          "index" : 0,
+          "type" : "INT"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "cap$2",
+          "index" : 1000000,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$*$1",
+          "operands" : [ {
+            "kind" : "LAMBDA_REF",
+            "name" : "x",
+            "index" : 0,
+            "type" : "INT"
+          }, {
+            "kind" : "LAMBDA_REF",
+            "name" : "cap$2",
+            "index" : 1000000,
+            "type" : "INT"
+          } ],
+          "type" : "INT"
+        }
+      }, {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 1,
+        "type" : "INT"
+      }, {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 2,
+        "type" : "INT"
+      } ],
+      "type" : "INT"
+    } ],
+    "condition" : null,
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` INT>",
+    "description" : "Calc(select=[my_two_lambdas(v, (x, cap$1) -> (x + cap$1), (x, cap$2) -> (x * cap$2), b1, b2) AS EXPR$0])"
+  }, {
+    "id" : 6,
+    "type" : "stream-exec-sink_2",
+    "configuration" : {
+      "table.exec.sink.keyed-shuffle" : "AUTO",
+      "table.exec.sink.not-null-enforcer" : "ERROR",
+      "table.exec.sink.rowtime-inserter" : "ENABLED",
+      "table.exec.sink.type-length-enforcer" : "IGNORE",
+      "table.exec.sink.upsert-materialize" : "AUTO"
+    },
+    "dynamicTableSink" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`sink_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "a",
+              "dataType" : "INT"
+            } ]
+          }
+        }
+      }
+    },
+    "inputChangelogMode" : [ "INSERT" ],
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` INT>",
+    "description" : "Sink(table=[default_catalog.default_database.sink_t], fields=[EXPR$0])"
+  } ],
+  "edges" : [ {
+    "source" : 4,
+    "target" : 5,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  }, {
+    "source" : 5,
+    "target" : 6,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  } ]
+}

@@ -53,6 +53,8 @@ public class CalcRestoreTest extends RestoreTestBase {
                 CalcTestPrograms.CALC_MAP_TRANSFORM_KEYS,
                 CalcTestPrograms.CALC_MAP_TRANSFORM_VALUES,
                 CalcTestPrograms.CALC_MAP_ZIP_WITH,
-                CalcTestPrograms.CALC_ARRAY_TRANSFORM_CAPTURE);
+                CalcTestPrograms.CALC_ARRAY_TRANSFORM_CAPTURE,
+                CalcTestPrograms.CALC_UDF_ARRAY_TRANSFORM,
+                CalcTestPrograms.CALC_UDF_TWO_LAMBDAS_CAPTURE);
     }
 }
