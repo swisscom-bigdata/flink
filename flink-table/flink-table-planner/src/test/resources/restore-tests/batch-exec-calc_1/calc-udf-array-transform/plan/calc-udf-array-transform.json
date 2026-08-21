@@ -1,0 +1,114 @@
+{
+  "flinkVersion" : "2.4",
+  "nodes" : [ {
+    "id" : 28,
+    "type" : "batch-exec-table-source-scan_1",
+    "scanTableSource" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`source_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "a",
+              "dataType" : "ARRAY<INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "outputType" : "ROW<`a` ARRAY<INT>>",
+    "description" : "TableSourceScan(table=[[default_catalog, default_database, source_t]], fields=[a])",
+    "dynamicFilteringDataListenerID" : "7a72eb93-7cd3-4567-8173-cdfbb65d9ebb"
+  }, {
+    "id" : 29,
+    "type" : "batch-exec-calc_1",
+    "projection" : [ {
+      "kind" : "CALL",
+      "systemName" : "my_array_transform",
+      "operands" : [ {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 0,
+        "type" : "ARRAY<INT>"
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "x",
+          "index" : 0,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$+$1",
+          "operands" : [ {
+            "kind" : "LAMBDA_REF",
+            "name" : "x",
+            "index" : 0,
+            "type" : "INT"
+          }, {
+            "kind" : "LITERAL",
+            "value" : 10,
+            "type" : "INT NOT NULL"
+          } ],
+          "type" : "INT"
+        }
+      } ],
+      "type" : "ARRAY<INT>"
+    } ],
+    "condition" : null,
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` ARRAY<INT>>",
+    "description" : "Calc(select=[my_array_transform(a, x -> (x + 10)) AS EXPR$0])"
+  }, {
+    "id" : 30,
+    "type" : "batch-exec-sink_1",
+    "configuration" : {
+      "table.exec.sink.not-null-enforcer" : "ERROR",
+      "table.exec.sink.type-length-enforcer" : "IGNORE"
+    },
+    "dynamicTableSink" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`sink_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "a",
+              "dataType" : "ARRAY<INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "BLOCKING",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` ARRAY<INT>>",
+    "description" : "Sink(table=[default_catalog.default_database.sink_t], fields=[EXPR$0])"
+  } ],
+  "edges" : [ {
+    "source" : 28,
+    "target" : 29,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  }, {
+    "source" : 29,
+    "target" : 30,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  } ]
+}

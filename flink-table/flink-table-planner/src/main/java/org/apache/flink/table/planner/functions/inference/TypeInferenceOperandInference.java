@@ -22,6 +22,7 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.functions.FunctionDefinition;
+import org.apache.flink.table.planner.calcite.FlinkSqlCallBinding;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.CallContext;
@@ -33,6 +34,7 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.runtime.CalciteContextException;
 import org.apache.calcite.sql.SqlCallBinding;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlOperandTypeInference;
 
 import java.util.List;
@@ -67,11 +69,12 @@ public final class TypeInferenceOperandInference implements SqlOperandTypeInfere
     @Override
     public void inferOperandTypes(
             SqlCallBinding callBinding, RelDataType returnType, RelDataType[] operandTypes) {
+        final SqlCallBinding binding = bindPermutedCall(callBinding);
         final CallContext callContext =
                 new CallBindingCallContext(
                         dataTypeFactory,
                         definition,
-                        callBinding,
+                        binding,
                         returnType,
                         typeInference.getStaticArguments().orElse(null));
         try {
@@ -80,13 +83,12 @@ public final class TypeInferenceOperandInference implements SqlOperandTypeInfere
             // parameter reference operand is transiently ANY). In that case defer: the operand
             // types are inferred in a later pass once the enclosing parameter is bound (mirrors the
             // operand checker and the built-in array higher-order function operators).
-            if (TypeInferenceOperandChecker.hasUnresolvedLambdaParameterOperand(callBinding)) {
+            if (TypeInferenceOperandChecker.hasUnresolvedLambdaParameterOperand(binding)) {
                 return;
             }
             // Bind lambda parameter types (if any) so that the lambda operands carry a concrete
             // FUNCTION type before the input type strategy inspects them.
-            TypeInferenceOperandChecker.bindLambdaArguments(
-                    callBinding, callContext, typeInference);
+            TypeInferenceOperandChecker.bindLambdaArguments(binding, callContext, typeInference);
             if (TypeInferenceUtil.validateArgumentCount(
                     typeInference.getInputTypeStrategy().getArgumentCount(),
                     callContext.getArgumentDataTypes().size(),
@@ -103,6 +105,28 @@ public final class TypeInferenceOperandInference implements SqlOperandTypeInfere
     }
 
     // --------------------------------------------------------------------------------------------
+
+    /**
+     * Calcite infers operand types on a binding of the call as written. With named arguments, the
+     * binding's {@link SqlCallBinding#operands()} are permuted into the declared order but its
+     * {@link SqlCallBinding#getOperandType(int)} is not, so the same position would denote two
+     * different arguments — and a lambda's strategy would derive its parameter types from the wrong
+     * sibling. Binds the permuted call instead, which is what the operand checker sees.
+     */
+    private static SqlCallBinding bindPermutedCall(SqlCallBinding callBinding) {
+        final boolean hasNamedArguments =
+                callBinding.getCall().getOperandList().stream()
+                        .anyMatch(
+                                operand ->
+                                        operand != null
+                                                && operand.getKind()
+                                                        == SqlKind.ARGUMENT_ASSIGNMENT);
+        if (!hasNamedArguments) {
+            return callBinding;
+        }
+        return new FlinkSqlCallBinding(
+                callBinding.getValidator(), callBinding.getScope(), callBinding.permutedCall());
+    }
 
     private void inferOperandTypesOrError(
             FlinkTypeFactory typeFactory, CallContext callContext, RelDataType[] operandTypes) {

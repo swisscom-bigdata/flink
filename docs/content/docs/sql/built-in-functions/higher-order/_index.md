@@ -107,4 +107,7 @@ table.select(
 {{< /tab >}}
 {{< /tabs >}}
 
+User-defined functions can declare lambda arguments as well, see
+[user-defined functions]({{< ref "docs/dev/table/functions/udfs" >}}#lambda-arguments).
+
 {{< sql_functions "higherorder" >}}

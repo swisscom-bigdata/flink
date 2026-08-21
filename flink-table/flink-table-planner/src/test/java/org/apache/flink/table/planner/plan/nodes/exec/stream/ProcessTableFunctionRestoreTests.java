@@ -42,6 +42,7 @@ public class ProcessTableFunctionRestoreTests extends RestoreTestBase {
         return List.of(
                 ProcessTableFunctionTestPrograms.PROCESS_ROW_SEMANTIC_TABLE_RESTORE,
                 ProcessTableFunctionTestPrograms.PROCESS_MULTI_STATE_RESTORE,
+                ProcessTableFunctionTestPrograms.PROCESS_LAMBDA_RESTORE,
                 ProcessTableFunctionTestPrograms.PROCESS_NAMED_TIMERS_RESTORE,
                 ProcessTableFunctionTestPrograms.PROCESS_MULTI_INPUT_RESTORE,
                 ProcessTableFunctionTestPrograms.PROCESS_MAP_STATE_RESTORE,

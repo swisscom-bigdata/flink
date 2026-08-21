@@ -22,7 +22,6 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.sql.parser.type.SqlRawTypeNameSpec;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.DataTypeFactory;
-import org.apache.flink.table.functions.BuiltInFunctionDefinition;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.utils.SqlValidatorUtils;
@@ -39,6 +38,7 @@ import org.apache.flink.table.types.inference.StaticArgumentTrait;
 import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.inference.TypeInferenceUtil;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RawType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
 import org.apache.flink.table.types.utils.TypeConversions;
@@ -226,6 +226,11 @@ public final class TypeInferenceOperandChecker
             // Untyped table arguments
             return typeFactory.createSqlType(SqlTypeName.ANY);
         }
+        if (type.is(LogicalTypeRoot.FUNCTION)) {
+            // A lambda argument of a process table function. Calcite cannot cast-check a lambda
+            // against a parameter type during routine lookup; the type inference validates it.
+            return typeFactory.createSqlType(SqlTypeName.ANY);
+        }
         if (arg.is(StaticArgumentTrait.TABLE)) {
             // A table argument must be a row type for Calcite,
             // although they might enter the UDF as a structured type
@@ -403,18 +408,6 @@ public final class TypeInferenceOperandChecker
                     String.format(
                             "Invalid lambda expression at position %d. Function '%s' does not "
                                     + "accept a lambda expression at any position.",
-                            IntStream.range(0, operands.size())
-                                    .filter(pos -> operands.get(pos) instanceof SqlLambda)
-                                    .findFirst()
-                                    .orElseThrow(IllegalStateException::new),
-                            callBinding.getOperator().getName()));
-        }
-        if (!(callContext.getFunctionDefinition() instanceof BuiltInFunctionDefinition)) {
-            throw new LambdaBindingException(
-                    String.format(
-                            "Invalid lambda expression at position %d. Lambda arguments are "
-                                    + "currently only supported by built-in functions, but '%s' "
-                                    + "is a user-defined function.",
                             IntStream.range(0, operands.size())
                                     .filter(pos -> operands.get(pos) instanceof SqlLambda)
                                     .findFirst()

@@ -39,6 +39,7 @@ import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.types.CollectionDataType;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.KeyValueDataType;
+import org.apache.flink.table.types.logical.FunctionType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.StructuredType;
@@ -162,6 +163,10 @@ public final class DataTypeExtractor {
         } else {
             template = DataTypeTemplate.fromDefaults();
         }
+        final DataType lambdaType = extractLambdaParameterType(template, parameter.getType());
+        if (lambdaType != null) {
+            return lambdaType;
+        }
         return extractDataTypeWithClassContext(
                 typeFactory,
                 template,
@@ -170,6 +175,32 @@ public final class DataTypeExtractor {
                 String.format(
                         " in parameter %d of method '%s' in class '%s'",
                         paramPos, method.getName(), baseClass.getName()));
+    }
+
+    /**
+     * Maps a parameter declared as one of the conversion classes of the {@code FUNCTION} type to a
+     * lambda argument of the class's arity. The generic type arguments of the class are ignored:
+     * the types of the lambda's parameters are derived per call by a {@link
+     * org.apache.flink.table.types.inference.LambdaInputTypeStrategy}, not extracted. An explicit
+     * data type or a forced RAW pattern takes precedence.
+     */
+    private static @Nullable DataType extractLambdaParameterType(
+            DataTypeTemplate template, Class<?> parameterClass) {
+        if (template.dataType != null || template.isForceAnyPattern(parameterClass)) {
+            return null;
+        }
+        for (int count = 0; count <= FunctionType.MAX_CONVERTIBLE_PARAMETER_COUNT; count++) {
+            final FunctionType type = new FunctionType(count);
+            // the generated function object implements the default conversion class, so the
+            // parameter must be that class or one of its supertypes that is a supported conversion
+            final boolean isExternal =
+                    type.supportsInputConversion(parameterClass)
+                            && parameterClass.isAssignableFrom(type.getDefaultConversion());
+            if (isExternal || parameterClass == FunctionType.internalConversionClass(count)) {
+                return DataTypes.FUNCTION(count).bridgedTo(parameterClass);
+            }
+        }
+        return null;
     }
 
     /**

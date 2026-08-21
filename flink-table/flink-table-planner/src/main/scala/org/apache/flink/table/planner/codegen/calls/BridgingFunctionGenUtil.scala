@@ -754,7 +754,9 @@ object BridgingFunctionGenUtil {
    * types as an explicit sequence (see `BuiltInScalarFunction#getTypeInference`), which no longer
    * carries the declaring strategy.
    */
-  private def requiredLambdaResultDataType(callContext: CallContext, pos: Int): Option[DataType] = {
+  private[codegen] def requiredLambdaResultDataType(
+      callContext: CallContext,
+      pos: Int): Option[DataType] = {
     val declaredStrategy = callContext.getFunctionDefinition
       .getTypeInference(callContext.getDataTypeFactory)
       .getInputTypeStrategy
@@ -778,7 +780,7 @@ object BridgingFunctionGenUtil {
    * higher-order function, since both take this path: an unchecked exception propagates unchanged,
    * while a checked exception is wrapped because the functional interface cannot declare it.
    */
-  private def generateLambdaFunctionObject(
+  private[codegen] def generateLambdaFunctionObject(
       ctx: CodeGeneratorContext,
       evaluatorFactory: ExpressionEvaluatorFactory,
       lambdaInfo: LambdaInfo,

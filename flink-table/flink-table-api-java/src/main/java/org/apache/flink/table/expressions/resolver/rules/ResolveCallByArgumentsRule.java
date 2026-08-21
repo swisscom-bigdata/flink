@@ -41,7 +41,6 @@ import org.apache.flink.table.expressions.UnresolvedCallExpression;
 import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
 import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.functions.AggregateFunctionDefinition;
-import org.apache.flink.table.functions.BuiltInFunctionDefinition;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.functions.FunctionIdentifier;
@@ -417,14 +416,6 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
                     definition.getTypeInference(resolutionContext.typeFactory());
             final InputTypeStrategy inputTypeStrategy = inference.getInputTypeStrategy();
             if (inputTypeStrategy instanceof LambdaInputTypeStrategy) {
-                if (!(definition instanceof BuiltInFunctionDefinition)) {
-                    throw new ValidationException(
-                            String.format(
-                                    "Invalid lambda expression at position %d. Lambda arguments "
-                                            + "are currently only supported by built-in "
-                                            + "functions, but '%s' is a user-defined function.",
-                                    lambdaPos, functionName));
-                }
                 final CallContext callContext =
                         new TableApiCallContext(
                                 resolutionContext.typeFactory(),

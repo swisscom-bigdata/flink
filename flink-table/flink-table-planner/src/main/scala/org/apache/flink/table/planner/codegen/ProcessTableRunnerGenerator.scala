@@ -43,9 +43,9 @@ import org.apache.flink.table.runtime.dataview.StateValueView.KeyedStateValueVie
 import org.apache.flink.table.runtime.generated.{GeneratedProcessTableRunner, ProcessTableRunner}
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.extraction.ExtractionUtils
-import org.apache.flink.table.types.inference.{TypeInference, TypeInferenceUtil}
+import org.apache.flink.table.types.inference.{CallContext, TypeInference, TypeInferenceUtil}
 import org.apache.flink.table.types.inference.TypeInferenceUtil.StateInfo
-import org.apache.flink.table.types.logical.LogicalType
+import org.apache.flink.table.types.logical.{FunctionType, LogicalType, LogicalTypeRoot}
 import org.apache.flink.table.types.logical.utils.{LogicalTypeCasts, LogicalTypeChecks}
 import org.apache.flink.types.Row
 
@@ -87,6 +87,10 @@ object ProcessTableRunnerGenerator {
         outputChangelogMode,
         inputUpsertKeys)
 
+    // Shared by the function's specialization and the lambda arguments of the call
+    val evaluatorFactory =
+      new DefaultExpressionEvaluatorFactory(ctx.tableConfig, ctx.classLoader, rexFactory, ctx)
+
     // Create the final UDF for runtime
     val udf = UserDefinedFunctionHelper.createSpecializedFunction(
       functionName,
@@ -94,7 +98,7 @@ object ProcessTableRunnerGenerator {
       callContext,
       classOf[PlannerBase].getClassLoader,
       ctx.tableConfig,
-      new DefaultExpressionEvaluatorFactory(ctx.tableConfig, ctx.classLoader, rexFactory, ctx)
+      evaluatorFactory
     )
     val functionTerm = ctx.addReusableFunction(udf)
     val inference = udf.getTypeInference(dataTypeFactory)
@@ -134,6 +138,9 @@ object ProcessTableRunnerGenerator {
     val evalCallCode = generateEvalCode(
       ctx,
       udfCall,
+      callContext,
+      castCallContext,
+      evaluatorFactory,
       enrichedArgumentDataTypes,
       wrapBroadcastContext(stateEntries, externalStateOperands, inference),
       stateDataTypes,
@@ -365,7 +372,11 @@ object ProcessTableRunnerGenerator {
   private def generateEvalOperands(
       ctx: CodeGeneratorContext,
       call: RexCall,
+      callContext: CallContext,
+      castCallContext: CallContext,
+      evaluatorFactory: DefaultExpressionEvaluatorFactory,
       enrichedArgumentDataTypes: Seq[DataType],
+      functionName: String,
       inputIndexTerm: String,
       inputRowTerm: String): Seq[GeneratedExpression] = {
     val generator = new ExprCodeGenerator(ctx, false)
@@ -373,8 +384,20 @@ object ProcessTableRunnerGenerator {
     // Generate (potentially cast) operands
     call.getOperands.asScala
       .zip(enrichedArgumentDataTypes)
+      .zipWithIndex
       .map {
-        case (tableArgCall: RexTableArgCall, targetDataType: DataType) =>
+        case ((_, targetDataType: DataType), pos)
+            if targetDataType.getLogicalType.is(LogicalTypeRoot.FUNCTION) =>
+          generateLambdaOperand(
+            ctx,
+            callContext,
+            castCallContext,
+            evaluatorFactory,
+            targetDataType,
+            functionName,
+            pos)
+
+        case ((tableArgCall: RexTableArgCall, targetDataType: DataType), _) =>
           val inputIndex = tableArgCall.getInputIndex
           val tableType = FlinkTypeFactory.toLogicalType(tableArgCall.getType).copy(true)
           val tableArgAccess = GeneratedExpression(
@@ -400,11 +423,44 @@ object ProcessTableRunnerGenerator {
           }
           tableArgWithKind
 
-        case (rexNode: RexNode, targetDataType: DataType) =>
+        case ((rexNode: RexNode, targetDataType: DataType), _) =>
           val scalarArg = generator.generateExpression(rexNode)
           val (castScalarArg, _) = castOperand(ctx, scalarArg, targetDataType.getLogicalType)
           castScalarArg
       }
+  }
+
+  /**
+   * Generates the function object for a lambda argument. It is created in callEval(), i.e. per
+   * eval() invocation, so that it never outlives the call it is passed to. A lambda of a process
+   * table function has no captures (see HigherOrderFunctionUtil#liftCaptures), so its parameters
+   * are exactly the ones the FUNCTION type declares.
+   */
+  private def generateLambdaOperand(
+      ctx: CodeGeneratorContext,
+      callContext: CallContext,
+      castCallContext: CallContext,
+      evaluatorFactory: DefaultExpressionEvaluatorFactory,
+      targetDataType: DataType,
+      functionName: String,
+      pos: Int): GeneratedExpression = {
+    val lambdaInfo = toScala(callContext.getLambdaArgument(pos)).getOrElse(
+      throw new CodeGenException(
+        s"Missing lambda argument at position $pos for function '$functionName'."))
+    val parameterCount =
+      targetDataType.getLogicalType.asInstanceOf[FunctionType].getParameterCount
+    if (lambdaInfo.getParameterFields.size() != parameterCount) {
+      throw new CodeGenException(
+        s"Lambda argument at position $pos of process table function '$functionName' must not " +
+          s"capture values.")
+    }
+    BridgingFunctionGenUtil.generateLambdaFunctionObject(
+      ctx,
+      evaluatorFactory,
+      lambdaInfo,
+      targetDataType,
+      BridgingFunctionGenUtil.requiredLambdaResultDataType(castCallContext, pos),
+      Nil)
   }
 
   /** Applies a cast if necessary. Also returns whether a cast was necessary. */
@@ -458,6 +514,9 @@ object ProcessTableRunnerGenerator {
   private def generateEvalCode(
       ctx: CodeGeneratorContext,
       call: RexCall,
+      callContext: CallContext,
+      castCallContext: CallContext,
+      evaluatorFactory: DefaultExpressionEvaluatorFactory,
       enrichedArgumentDataTypes: Seq[DataType],
       externalStateOperands: Seq[GeneratedExpression],
       stateDataTypes: Seq[DataType],
@@ -470,7 +529,16 @@ object ProcessTableRunnerGenerator {
     val inputRowTerm = "inputRow"
     val collectorTerm = "evalCollector"
     val callOperands =
-      generateEvalOperands(ctx, call, enrichedArgumentDataTypes, inputIndexTerm, inputRowTerm)
+      generateEvalOperands(
+        ctx,
+        call,
+        callContext,
+        castCallContext,
+        evaluatorFactory,
+        enrichedArgumentDataTypes,
+        functionName,
+        inputIndexTerm,
+        inputRowTerm)
     val externalCallOperands =
       BridgingFunctionGenUtil.prepareExternalOperands(ctx, callOperands, enrichedArgumentDataTypes)
     val allExternalOperands = externalStateOperands ++ externalCallOperands
