@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.functions.utils;
 
 import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.planner.plan.schema.GenericRelDataType;
 import org.apache.flink.types.Either;
 
 import org.apache.calcite.rel.type.RelDataType;
@@ -47,6 +48,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.apache.calcite.util.Static.RESOURCE;
 import static org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType;
@@ -54,6 +56,45 @@ import static org.apache.flink.table.types.logical.LogicalTypeFamily.CHARACTER_S
 
 /** Utility methods related to SQL validation. */
 public class SqlValidatorUtils {
+
+    /**
+     * Whether the given type is the placeholder of a lambda parameter that has not been bound yet.
+     *
+     * <p>The body of a higher-order function's lambda is type-derived before the enclosing call's
+     * operand checker binds the parameter, so during that first pass the parameter -- and anything
+     * derived from it -- is a plain {@code ANY}. An operator that cannot build a meaningful type
+     * from it must defer by returning {@code ANY} itself; the concrete type is computed in a later
+     * validation pass once the parameter is bound.
+     *
+     * <p>Flink's encapsulated {@code ANY} ({@link GenericRelDataType}) is a resolved type and does
+     * not count; genuine RAW types use {@code SqlTypeName.OTHER}, so only the placeholder matches.
+     */
+    public static boolean isUnresolvedLambdaParameter(RelDataType type) {
+        return type.getSqlTypeName() == SqlTypeName.ANY && !(type instanceof GenericRelDataType);
+    }
+
+    /**
+     * Whether the given type is, or is composed of, an unbound lambda parameter placeholder (see
+     * {@link #isUnresolvedLambdaParameter}). The placeholder can be nested in a collection or row
+     * type because an operator such as {@code ROW(param, 1)} derives a composite type from it
+     * without failing.
+     */
+    public static boolean containsUnresolvedLambdaParameter(RelDataType type) {
+        if (isUnresolvedLambdaParameter(type)) {
+            return true;
+        }
+        if (type.isStruct()) {
+            return type.getFieldList().stream()
+                    .anyMatch(field -> containsUnresolvedLambdaParameter(field.getType()));
+        }
+        return Stream.of(type.getComponentType(), type.getKeyType(), type.getValueType())
+                .anyMatch(nested -> nested != null && containsUnresolvedLambdaParameter(nested));
+    }
+
+    /** Whether any of the given types contains an unbound lambda parameter placeholder. */
+    public static boolean containsUnresolvedLambdaParameter(List<RelDataType> types) {
+        return types.stream().anyMatch(SqlValidatorUtils::containsUnresolvedLambdaParameter);
+    }
 
     public static void adjustTypeForArrayConstructor(
             RelDataType componentType, SqlOperatorBinding opBinding) {
@@ -234,7 +275,11 @@ public class SqlValidatorUtils {
         }
     }
 
-    private static SqlNode castTo(SqlNode node, RelDataType type) {
+    /**
+     * Wraps the given node into {@code CAST(node AS type)}. Used to insert an implicit cast for an
+     * operand that a function generalizes to a common type.
+     */
+    public static SqlNode castTo(SqlNode node, RelDataType type) {
         return SqlStdOperatorTable.CAST.createCall(
                 SqlParserPos.ZERO,
                 node,

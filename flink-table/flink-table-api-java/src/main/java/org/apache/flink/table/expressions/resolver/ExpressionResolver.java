@@ -123,14 +123,29 @@ public class ExpressionResolver {
 
     private final Map<String, LocalReferenceExpression> localReferences;
 
+    /**
+     * Parameters of the enclosing lambda(s), in scope order, when this resolver resolves the body
+     * of a nested lambda. Kept separate from {@link #localReferences} (which may also hold
+     * non-lambda locals such as over-window aliases) so that only lambda parameters are carried
+     * into a further nested lambda's scope. Empty for a top-level (non-lambda) resolver.
+     */
+    private final List<LocalReferenceExpression> enclosingLambdaParameters;
+
     private final @Nullable DataType outputDataType;
 
     private final Map<Expression, LocalOverWindow> localOverWindows;
 
     private final boolean isGroupedAggregation;
 
+    /**
+     * @param preparedOverWindows the over-windows of the enclosing resolver, already resolved
+     *     against its inputs. Passed only when creating the resolver of a lambda body, which shares
+     *     the enclosing scope's windows but must not re-resolve them: its own field lookup hides
+     *     the columns shadowed by the lambda parameters. Null everywhere else, in which case {@code
+     *     localOverWindows} is resolved here.
+     */
     private ExpressionResolver(
-            TableConfig tableConfig,
+            ReadableConfig tableConfig,
             ClassLoader userClassLoader,
             TableReferenceLookup tableLookup,
             FunctionLookup functionLookup,
@@ -138,7 +153,9 @@ public class ExpressionResolver {
             SqlExpressionResolver sqlExpressionResolver,
             FieldReferenceLookup fieldLookup,
             List<OverWindow> localOverWindows,
+            @Nullable Map<Expression, LocalOverWindow> preparedOverWindows,
             List<LocalReferenceExpression> localReferences,
+            List<LocalReferenceExpression> enclosingLambdaParameters,
             @Nullable DataType outputDataType,
             boolean isGroupedAggregation) {
         this.config = Preconditions.checkNotNull(tableConfig);
@@ -160,8 +177,12 @@ public class ExpressionResolver {
                                                     "Duplicate local reference: " + u);
                                         },
                                         LinkedHashMap::new));
+        this.enclosingLambdaParameters = enclosingLambdaParameters;
         this.outputDataType = outputDataType;
-        this.localOverWindows = prepareOverWindows(localOverWindows);
+        this.localOverWindows =
+                preparedOverWindows != null
+                        ? preparedOverWindows
+                        : prepareOverWindows(localOverWindows);
         this.isGroupedAggregation = isGroupedAggregation;
     }
 
@@ -228,6 +249,70 @@ public class ExpressionResolver {
         final Function<List<Expression>, List<Expression>> resolveFunction =
                 concatenateRules(getExpandingResolverRules());
         return resolveFunction.apply(expressions);
+    }
+
+    /**
+     * Resolves the body of a lambda expression in a scope that contains the given lambda
+     * parameters.
+     *
+     * <p>The body may close over the parameters of any enclosing lambdas (for nested higher-order
+     * calls) and over the input columns of the surrounding query (a {@link
+     * org.apache.flink.table.expressions.FieldReferenceExpression}), matching the scoping used on
+     * the SQL side. The given parameters shadow enclosing parameters, and parameters shadow input
+     * columns, of the same name. Both kinds of capture are closure-converted out of the lambda when
+     * it is converted to a {@link org.apache.calcite.rex.RexLambda} (see {@code
+     * HigherOrderFunctionUtil#liftCaptures}).
+     *
+     * @param body the (unresolved) lambda body
+     * @param parameters the lambda parameters with their bound types
+     * @return the resolved body
+     */
+    public ResolvedExpression resolveLambdaBody(
+            Expression body, List<LocalReferenceExpression> parameters) {
+        // The parameters in scope are those of this lambda plus those of any enclosing lambdas,
+        // with
+        // this lambda's parameters shadowing enclosing ones of the same name (declaration order is
+        // kept so the outer-to-inner scope order is preserved). Keying by name is unambiguous
+        // because a lambda's own parameter names are unique (see UnresolvedLambdaExpression).
+        final Map<String, LocalReferenceExpression> scopeParameters = new LinkedHashMap<>();
+        for (LocalReferenceExpression enclosing : enclosingLambdaParameters) {
+            scopeParameters.put(enclosing.getName(), enclosing);
+        }
+        for (LocalReferenceExpression parameter : parameters) {
+            scopeParameters.put(parameter.getName(), parameter);
+        }
+        final List<LocalReferenceExpression> scopeParameterList =
+                new ArrayList<>(scopeParameters.values());
+
+        // The parameters shadow input columns of the same name, so hide those columns from the
+        // field lookup (references are resolved as fields before local references).
+        final FieldReferenceLookup lambdaFieldLookup =
+                fieldLookup.withoutFields(scopeParameters.keySet());
+        final ExpressionResolver childResolver =
+                new ExpressionResolver(
+                        config,
+                        userClassLoader,
+                        tableLookup,
+                        functionLookup,
+                        typeFactory,
+                        sqlExpressionResolver,
+                        lambdaFieldLookup,
+                        Collections.emptyList(),
+                        // the body shares the enclosing scope's over-windows, so that
+                        // "a.arrayTransform(x -> x.plus($("base").sum().over($("w"))))" can
+                        // reference a window declared on the surrounding table
+                        localOverWindows,
+                        scopeParameterList,
+                        scopeParameterList,
+                        null,
+                        isGroupedAggregation);
+        final List<ResolvedExpression> resolved =
+                childResolver.resolve(Collections.singletonList(body));
+        if (resolved.size() != 1) {
+            throw new TableException(
+                    "A lambda body must resolve to a single expression. Got: " + resolved);
+        }
+        return resolved.get(0);
     }
 
     /**
@@ -335,6 +420,12 @@ public class ExpressionResolver {
         @Override
         public PostResolverFactory postResolutionFactory() {
             return postResolverFactory;
+        }
+
+        @Override
+        public ResolvedExpression resolveLambdaBody(
+                Expression body, List<LocalReferenceExpression> parameters) {
+            return ExpressionResolver.this.resolveLambdaBody(body, parameters);
         }
 
         @Override
@@ -499,7 +590,9 @@ public class ExpressionResolver {
                     sqlExpressionResolver,
                     new FieldReferenceLookup(queryOperations),
                     logicalOverWindows,
+                    null,
                     localReferences,
+                    Collections.emptyList(),
                     outputDataType,
                     isGroupedAggregation);
         }

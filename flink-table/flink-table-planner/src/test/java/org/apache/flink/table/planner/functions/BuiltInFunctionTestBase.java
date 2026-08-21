@@ -197,6 +197,12 @@ abstract class BuiltInFunctionTestBase {
             return new TestSetSpec(null, Preconditions.checkNotNull(description));
         }
 
+        /** The function under test, or null if the specification was built for an expression. */
+        @Nullable
+        BuiltInFunctionDefinition getDefinition() {
+            return definition;
+        }
+
         /**
          * Sets the field data for creating an input table.
          *

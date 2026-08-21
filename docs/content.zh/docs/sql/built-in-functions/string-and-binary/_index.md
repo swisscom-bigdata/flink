@@ -1,6 +1,6 @@
 ---
 title: "String & Binary"
-weight: 15
+weight: 16
 type: docs
 bookCollapseSection: true
 sqlFunctions: string

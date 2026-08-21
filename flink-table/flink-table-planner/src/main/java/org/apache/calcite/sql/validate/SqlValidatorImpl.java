@@ -18,6 +18,7 @@ package org.apache.calcite.sql.validate;
 
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.planner.calcite.FlinkSqlCallBinding;
+import org.apache.flink.table.planner.calcite.FlinkSqlLambdaScope;
 import org.apache.flink.table.planner.functions.sql.ml.SqlVectorSearchTableFunction;
 
 import com.google.common.collect.ImmutableList;
@@ -185,40 +186,49 @@ import static org.apache.calcite.util.Util.first;
  * Default implementation of {@link SqlValidator}, the class was copied over because of
  * CALCITE-4554.
  *
- * <p>Lines 240 ~ 243, Flink improves error message for functions without appropriate arguments in
+ * <p>Lines 250 ~ 253, Flink improves error message for functions without appropriate arguments in
  * handleUnresolvedFunction.
  *
- * <p>Lines 2127 ~ 2141, Flink improves error message for functions without appropriate arguments in
+ * <p>Lines 2137 ~ 2151, Flink improves error message for functions without appropriate arguments in
  * handleUnresolvedFunction at {@link SqlValidatorImpl#handleUnresolvedFunction}.
  *
- * <p>Lines 2396 ~ 2407
+ * <p>Lines 2406 ~ 2417
  *
- * <p>Lines 2563 ~ 2565, CALCITE-7471 should be removed after upgrading Calcite to 1.42.0.
+ * <p>Lines 2573 ~ 2575, CALCITE-7471 should be removed after upgrading Calcite to 1.42.0.
  *
- * <p>Lines 2679 ~ 2698, CALCITE-7217, CALCITE-7312 should be removed after upgrading Calcite to
+ * <p>Lines 2689 ~ 2708, CALCITE-7217, CALCITE-7312 should be removed after upgrading Calcite to
  * 1.42.0.
  *
- * <p>Lines 2729 ~ 2747, set the correct scope for VECTOR_SEARCH.
+ * <p>Lines 2739 ~ 2757, set the correct scope for VECTOR_SEARCH.
  *
- * <p>Lines 4320 ~ 4324, 7183 ~ 7189 Flink improves Optimize the retrieval of sub-operands in
+ * <p>Lines 4344 ~ 4348, 7207 ~ 7213 Flink improves Optimize the retrieval of sub-operands in
  * SqlCall when using NamedParameters at {@link SqlValidatorImpl#checkRollUp}.
  *
- * <p>Lines 5913 ~ 5919, FLINK-24352 Add null check for temporal table check on SqlSnapshot.
+ * <p>Lines 5937 ~ 5943, FLINK-24352 Add null check for temporal table check on SqlSnapshot.
  *
- * <p>Lines 6330-6345, CALCITE-7538 should be removed after upgrading Calcite to 1.42.0.
+ * <p>Lines 6354-6369, CALCITE-7538 should be removed after upgrading Calcite to 1.42.0.
  *
- * <p>Lines 6355-6357, CALCITE-7466 should be removed after upgrading Calcite to 1.42.0.
+ * <p>Lines 6379-6381, CALCITE-7466 should be removed after upgrading Calcite to 1.42.0.
  *
- * <p>Lines 6411-6413, CALCITE-7470 should be removed after upgrading Calcite to 1.42.0.
+ * <p>Lines 6435-6437, CALCITE-7470 should be removed after upgrading Calcite to 1.42.0.
  *
- * <p>Lines 7274-7282, Added in FLINK-39695 (backport of CALCITE-6764): propagate parent record
+ * <p>Lines 7298-7306, Added in FLINK-39695 (backport of CALCITE-6764): propagate parent record
  * nullability to nested fields.
  *
- * <p>Lines 8150-8173, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
+ * <p>Lines 8174-8197, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
  *
- * <p>Lines 8220-8237, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
+ * <p>Lines 8244-8261, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
  *
- * <p>Lines 8282-8290, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
+ * <p>Lines 8306-8314, CALCITE-7486 should be removed after upgrading Calcite to 1.42.0.
+ *
+ * <p>Lines 3056 ~ 3068, 3075 ~ 3077, FLINK-31207 (higher-order functions and lambdas): the LAMBDA
+ * case of {@code registerFrom} creates a {@link
+ * org.apache.flink.table.planner.calcite.FlinkSqlLambdaScope} and registers the lambda call's
+ * operands under the lambda's own scope instead of the parent scope, so a nested lambda can close
+ * over the enclosing lambda's parameters. CALCITE-6242 (fixVersion 1.43.0) makes the same change
+ * upstream, so the blocks should be removed after upgrading Calcite to 1.43.0. They have to live
+ * here because {@code registerFrom} is private; every other part of Flink's lambda validation is an
+ * override in {@code FlinkCalciteSqlValidator}.
  */
 public class SqlValidatorImpl implements SqlValidatorWithHints {
     // ~ Static fields/initializers ---------------------------------------------
@@ -3043,14 +3053,28 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
 
             case LAMBDA:
                 call = (SqlCall) node;
-                SqlLambdaScope lambdaScope = new SqlLambdaScope(parentScope, (SqlLambda) call);
+                // ----- FLINK MODIFICATION BEGIN -----
+                // Use Flink's SqlLambdaScope subclass, whose lambda body may close over the
+                // columns of the enclosing query and the parameters of enclosing lambdas, and
+                // register the operands (in particular the body) under the lambda's own scope
+                // rather than the parent scope, so that a nested lambda in the body has this
+                // lambda's scope as its parent (see FlinkSqlLambdaScope). The scope creation and
+                // the operand registration both sit in this private method, so neither can be
+                // reached from a SqlValidatorImpl subclass.
+                //
+                // CALCITE-6242 (fixVersion 1.43.0) makes the same change upstream (registering
+                // only operand 1, the body); remove this block after upgrading to Calcite 1.43.0.
+                SqlLambdaScope lambdaScope = new FlinkSqlLambdaScope(parentScope, (SqlLambda) call);
+                // ----- FLINK MODIFICATION END -----
                 scopes.put(call, lambdaScope);
                 final LambdaNamespace lambdaNamespace =
                         new LambdaNamespace(this, (SqlLambda) call, node);
                 registerNamespace(usingScope, alias, lambdaNamespace, forceNullable);
                 operands = call.getOperandList();
                 for (int i = 0; i < operands.size(); i++) {
-                    registerOperandSubQueries(parentScope, call, i);
+                    // ----- FLINK MODIFICATION BEGIN -----
+                    registerOperandSubQueries(lambdaScope, call, i);
+                    // ----- FLINK MODIFICATION END -----
                 }
                 break;
 

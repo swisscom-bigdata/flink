@@ -1,6 +1,6 @@
 ---
 title: "Row & Structured"
-weight: 14
+weight: 15
 type: docs
 bookCollapseSection: true
 sqlFunctions: structured

@@ -53,6 +53,8 @@ import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexCorrelVariable;
 import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLambda;
+import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexPatternFieldRef;
@@ -130,6 +132,12 @@ final class RexNodeJsonSerializer extends StdSerializer<RexNode> {
     static final String FIELD_NAME_ORDER_KEYS = "orderKeys";
     static final String FIELD_NAME_ORDER_DIRECTIONS = "orderDirections";
 
+    // LAMBDA / LAMBDA_REF (higher-order function arguments)
+    static final String KIND_LAMBDA = "LAMBDA";
+    static final String KIND_LAMBDA_REF = "LAMBDA_REF";
+    static final String FIELD_NAME_PARAMETERS = "parameters";
+    static final String FIELD_NAME_INDEX = "index";
+
     RexNodeJsonSerializer() {
         super(RexNode.class);
     }
@@ -165,6 +173,10 @@ final class RexNodeJsonSerializer extends StdSerializer<RexNode> {
                 if (rexNode instanceof RexTableArgCall) {
                     serializeTableArgCall(
                             (RexTableArgCall) rexNode, jsonGenerator, serializerProvider);
+                } else if (rexNode instanceof RexLambda) {
+                    serializeLambda((RexLambda) rexNode, jsonGenerator, serializerProvider);
+                } else if (rexNode instanceof RexLambdaRef) {
+                    serializeLambdaRef((RexLambdaRef) rexNode, jsonGenerator, serializerProvider);
                 } else if (rexNode instanceof RexCall) {
                     serializeCall(
                             (RexCall) rexNode,
@@ -358,6 +370,34 @@ final class RexNodeJsonSerializer extends StdSerializer<RexNode> {
             }
         }
         serializerProvider.defaultSerializeField(FIELD_NAME_TYPE, tableArgCall.getType(), gen);
+        gen.writeEndObject();
+    }
+
+    private static void serializeLambda(
+            RexLambda lambda, JsonGenerator gen, SerializerProvider serializerProvider)
+            throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField(FIELD_NAME_KIND, KIND_LAMBDA);
+        gen.writeFieldName(FIELD_NAME_PARAMETERS);
+        gen.writeStartArray();
+        for (RexLambdaRef parameter : lambda.getParameters()) {
+            serializerProvider.defaultSerializeValue(parameter, gen);
+        }
+        gen.writeEndArray();
+        // The lambda's FUNCTION type is not serialized: it is reconstructed from the parameter
+        // types and the body type when the RexLambda is rebuilt on deserialization.
+        serializerProvider.defaultSerializeField(FIELD_NAME_EXPR, lambda.getExpression(), gen);
+        gen.writeEndObject();
+    }
+
+    private static void serializeLambdaRef(
+            RexLambdaRef lambdaRef, JsonGenerator gen, SerializerProvider serializerProvider)
+            throws IOException {
+        gen.writeStartObject();
+        gen.writeStringField(FIELD_NAME_KIND, KIND_LAMBDA_REF);
+        gen.writeStringField(FIELD_NAME_NAME, lambdaRef.getName());
+        gen.writeNumberField(FIELD_NAME_INDEX, lambdaRef.getIndex());
+        serializerProvider.defaultSerializeField(FIELD_NAME_TYPE, lambdaRef.getType(), gen);
         gen.writeEndObject();
     }
 

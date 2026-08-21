@@ -1,6 +1,6 @@
 ---
 title: "Mathematical"
-weight: 11
+weight: 12
 type: docs
 bookCollapseSection: true
 sqlFunctions: arithmetic

@@ -105,5 +105,9 @@ public interface LogicalTypeVisitor<R> {
         return visit((LogicalType) uuidType);
     }
 
+    default R visit(FunctionType functionType) {
+        return visit((LogicalType) functionType);
+    }
+
     R visit(LogicalType other);
 }

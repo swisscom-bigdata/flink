@@ -162,4 +162,9 @@ class WatermarkGeneratorFunctionContext(
   override def addReusableConverter(dataType: DataType, classLoaderTerm: String = null): String = {
     super.addReusableConverter(dataType, "this.getClass().getClassLoader()")
   }
+
+  // A watermark generator pushed into a source is not an operator and thus has no runtime context.
+  override def functionContextCode(): String =
+    s"new ${classOf[FunctionContext].getCanonicalName}(" +
+      "null, this.getClass().getClassLoader(), openContext)"
 }

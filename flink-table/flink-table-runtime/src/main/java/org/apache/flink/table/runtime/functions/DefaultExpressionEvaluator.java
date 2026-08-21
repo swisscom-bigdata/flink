@@ -53,6 +53,43 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     public MethodHandle open(FunctionContext context) {
+        final RichFunction openedInstance = openInstance(context);
+        try {
+            final MethodHandles.Lookup publicLookup = MethodHandles.publicLookup();
+            return publicLookup
+                    .findVirtual(openedInstance.getClass(), "eval", methodType)
+                    .bindTo(openedInstance);
+        } catch (Exception e) {
+            throw new TableException(
+                    String.format(
+                            "Expression evaluator for '%s' could not be opened.",
+                            expressionSummary),
+                    e);
+        }
+    }
+
+    /**
+     * Creates and initializes the runtime implementation for a compiled lambda body, and returns it
+     * as the factory for the function objects handed to a higher-order function.
+     *
+     * <p>This is the counterpart of {@link #open(FunctionContext)} for lambda arguments. It hands
+     * out the generated instance itself instead of a {@link MethodHandle} onto its {@code eval}
+     * method, so that applying the lambda does not pay {@link
+     * MethodHandle#invokeWithArguments(Object...)}'s per-application boxing and adaptation. It is
+     * only callable when the evaluator was generated for a lambda body.
+     */
+    public LambdaFunctionFactory openLambdaFactory(FunctionContext context) {
+        final RichFunction openedInstance = openInstance(context);
+        if (!(openedInstance instanceof LambdaFunctionFactory)) {
+            throw new TableException(
+                    String.format(
+                            "Expression evaluator for '%s' was not generated for a lambda body.",
+                            expressionSummary));
+        }
+        return (LambdaFunctionFactory) openedInstance;
+    }
+
+    private RichFunction openInstance(FunctionContext context) {
         Preconditions.checkState(
                 instance == null,
                 "Expression evaluator for '%s' has already been opened.",
@@ -60,10 +97,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         try {
             instance = generatedClass.newInstance(context.getUserCodeClassLoader());
             instance.open(DefaultOpenContext.INSTANCE);
-            final MethodHandles.Lookup publicLookup = MethodHandles.publicLookup();
-            return publicLookup
-                    .findVirtual(instance.getClass(), "eval", methodType)
-                    .bindTo(instance);
+            return instance;
         } catch (Exception e) {
             throw new TableException(
                     String.format(

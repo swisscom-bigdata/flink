@@ -27,6 +27,7 @@ import org.apache.flink.table.types.inference.ArgumentTypeStrategy;
 import org.apache.flink.table.types.inference.CallContext;
 import org.apache.flink.table.types.inference.ConstantArgumentCount;
 import org.apache.flink.table.types.inference.InputTypeStrategy;
+import org.apache.flink.table.types.inference.LambdaInfo;
 import org.apache.flink.table.types.inference.Signature;
 import org.apache.flink.util.Preconditions;
 
@@ -171,6 +172,14 @@ public final class SubsequenceInputTypeStrategy implements InputTypeStrategy {
         @Override
         public <T> Optional<T> getArgumentValue(int pos, Class<T> clazz) {
             return originalCallContext.getArgumentValue(pos + split.startIndex, clazz);
+        }
+
+        @Override
+        public Optional<LambdaInfo> getLambdaArgument(int pos) {
+            // No built-in combines compositeSequence() with lambda(...) today, but the position
+            // must be shifted like every other per-argument accessor above so that a strategy
+            // nested in a split never reads the lambda of a different argument.
+            return originalCallContext.getLambdaArgument(pos + split.startIndex);
         }
 
         @Override
