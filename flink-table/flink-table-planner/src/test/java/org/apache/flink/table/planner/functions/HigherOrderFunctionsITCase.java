@@ -20,15 +20,19 @@ package org.apache.flink.table.planner.functions;
 
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
+import org.apache.flink.util.CollectionUtil;
 
 import java.math.BigDecimal;
 import java.util.stream.Stream;
 
+import static org.apache.flink.util.CollectionUtil.entry;
+
 /**
- * Tests for the built-in array higher-order functions ({@code ARRAY_TRANSFORM}, {@code
- * ARRAY_FILTER}, {@code ARRAY_REDUCE} and {@code ARRAY_ZIP_WITH}), which take a lambda argument.
- * These run in streaming mode; {@link HigherOrderFunctionsBatchITCase} covers the same functions in
- * batch mode.
+ * Tests for the built-in array and map higher-order functions ({@code ARRAY_TRANSFORM}, {@code
+ * ARRAY_FILTER}, {@code ARRAY_REDUCE}, {@code ARRAY_ZIP_WITH}, {@code MAP_FILTER}, {@code
+ * MAP_TRANSFORM_KEYS}, {@code MAP_TRANSFORM_VALUES} and {@code MAP_ZIP_WITH}), which take a lambda
+ * argument. These run in streaming mode; {@link HigherOrderFunctionsBatchITCase} covers the same
+ * functions in batch mode.
  */
 class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
 
@@ -40,6 +44,11 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                         arrayFilterTestCases(),
                         arrayReduceTestCases(),
                         arrayZipWithTestCases(),
+                        mapFilterTestCases(),
+                        mapTransformKeysTestCases(),
+                        mapTransformValuesTestCases(),
+                        mapZipWithTestCases(),
+                        mapLogicalKeyEqualityTestCases(),
                         nestedLambdaAnyReturnTestCases())
                 .flatMap(s -> s);
     }
@@ -354,14 +363,336 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.ARRAY(DataTypes.BIGINT())));
     }
 
+    private Stream<TestSetSpec> mapFilterTestCases() {
+        return Stream.of(
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_FILTER)
+                        .onFieldsWithData(CollectionUtil.map(entry("a", 1), entry("b", 2)), null, 1)
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.INT())
+                        .testSqlResult(
+                                "MAP_FILTER(f0, (k, v) -> v > 1)",
+                                CollectionUtil.map(entry("b", 2)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // the predicate closes over an outer column (f2 = 1)
+                        .testSqlResult(
+                                "MAP_FILTER(f0, (k, v) -> v > f2)",
+                                CollectionUtil.map(entry("b", 2)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // NULL map -> NULL
+                        .testSqlResult(
+                                "MAP_FILTER(f1, (k, v) -> v > 1)",
+                                null,
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                // A predicate that evaluates to NULL (here because the value is NULL) excludes the
+                // entry, matching ARRAY_FILTER. MAP_FILTER uses a separate generated loop, so it
+                // is covered explicitly.
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_FILTER)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry("a", 1), entry("b", null), entry("c", 3)))
+                        .andDataTypes(DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().nullable()))
+                        .testSqlResult(
+                                "MAP_FILTER(f0, (k, v) -> v > 1)",
+                                CollectionUtil.map(entry("c", 3)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().nullable())));
+    }
+
+    private Stream<TestSetSpec> mapTransformKeysTestCases() {
+        return Stream.of(
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_TRANSFORM_KEYS)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry(1, "a"), entry(2, "b")), null, 100)
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()),
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()),
+                                DataTypes.INT())
+                        // each key is replaced by the lambda body; values unchanged
+                        .testSqlResult(
+                                "MAP_TRANSFORM_KEYS(f0, (k, v) -> k + 10)",
+                                CollectionUtil.map(entry(11, "a"), entry(12, "b")),
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))
+                        // the key transform closes over an outer column (f2 = 100)
+                        .testSqlResult(
+                                "MAP_TRANSFORM_KEYS(f0, (k, v) -> k + f2)",
+                                CollectionUtil.map(entry(101, "a"), entry(102, "b")),
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))
+                        // NULL map -> NULL
+                        .testSqlResult(
+                                "MAP_TRANSFORM_KEYS(f1, (k, v) -> k + 10)",
+                                null,
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))
+                        // the key transform changes the key logical type (INT -> STRING); the
+                        // output map key type must follow the lambda body type
+                        .testSqlResult(
+                                "MAP_TRANSFORM_KEYS(f0, (k, v) -> CAST(k + 10 AS STRING))",
+                                CollectionUtil.map(entry("11", "a"), entry("12", "b")),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING())));
+    }
+
+    private Stream<TestSetSpec> mapTransformValuesTestCases() {
+        return Stream.of(
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_TRANSFORM_VALUES)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry("a", 1), entry("b", 2)), null, 100)
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.INT())
+                        // each value is replaced by the lambda body; keys unchanged
+                        .testSqlResult(
+                                "MAP_TRANSFORM_VALUES(f0, (k, v) -> v * 10)",
+                                CollectionUtil.map(entry("a", 10), entry("b", 20)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // the value transform closes over an outer column (f2 = 100)
+                        .testSqlResult(
+                                "MAP_TRANSFORM_VALUES(f0, (k, v) -> v + f2)",
+                                CollectionUtil.map(entry("a", 101), entry("b", 102)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // NULL map -> NULL
+                        .testSqlResult(
+                                "MAP_TRANSFORM_VALUES(f1, (k, v) -> v * 10)",
+                                null,
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // the value transform changes the value logical type (INT -> DOUBLE); the
+                        // output map value type must follow the lambda body type
+                        .testSqlResult(
+                                "MAP_TRANSFORM_VALUES(f0, (k, v) -> CAST(v AS DOUBLE))",
+                                CollectionUtil.map(entry("a", 1.0), entry("b", 2.0)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.DOUBLE())));
+    }
+
+    private Stream<TestSetSpec> mapZipWithTestCases() {
+        return Stream.of(
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_ZIP_WITH)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry("a", 1), entry("b", 2)),
+                                CollectionUtil.map(entry("a", 10), entry("c", 30)),
+                                null,
+                                100,
+                                CollectionUtil.map(entry("x", 1), entry("y", 2)),
+                                CollectionUtil.map(entry("p", 10), entry("q", 20)),
+                                CollectionUtil.map(entry("a", 100), entry("b", 200)))
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry("a", 1), entry("b", 2)),
+                                CollectionUtil.map(entry("a", 10), entry("c", 30)),
+                                null,
+                                100,
+                                CollectionUtil.map(entry("x", 1), entry("y", 2)),
+                                CollectionUtil.map(entry("p", 10), entry("q", 20)),
+                                CollectionUtil.map(entry("a", 100), entry("b", 200)))
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.INT(),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // merge over the union of keys; an absent key passes NULL for that side, so
+                        // a key present in only one map yields a NULL value (v1 + v2 with a NULL
+                        // operand is NULL)
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2)",
+                                CollectionUtil.map(
+                                        entry("a", 11), entry("b", null), entry("c", null)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // the merge lambda closes over an outer column (f3 = 100)
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2 + f3)",
+                                CollectionUtil.map(
+                                        entry("a", 111), entry("b", null), entry("c", null)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // NULL map -> NULL
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f2, f1, (k, v1, v2) -> v1 + v2)",
+                                null,
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // the merge changes the value logical type (INT -> BIGINT); the output map
+                        // value type must follow the lambda body type
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> CAST(v1 AS BIGINT))",
+                                CollectionUtil.map(
+                                        entry("a", 1L), entry("b", 2L), entry("c", null)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT()))
+                        // fully disjoint key sets: the result is the union of both key sets and
+                        // every entry sees a NULL on exactly one side, so each map contributes its
+                        // own value untouched
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f4, f5, (k, v1, v2) -> IFNULL(v1, v2))",
+                                CollectionUtil.map(
+                                        entry("x", 1),
+                                        entry("y", 2),
+                                        entry("p", 10),
+                                        entry("q", 20)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // identical key sets: no key is absent on either side, so no NULL is passed
+                        // to the lambda and the result has exactly the shared keys
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f0, f6, (k, v1, v2) -> v1 + v2)",
+                                CollectionUtil.map(entry("a", 101), entry("b", 202)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_ZIP_WITH)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry(1, 1), entry(2, 2)),
+                                CollectionUtil.map(entry(1L, 10L), entry(3L, 30L)),
+                                CollectionUtil.map(entry(new BigDecimal("1.20"), 1)),
+                                CollectionUtil.map(entry(new BigDecimal("1.200"), 2)))
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.BIGINT(), DataTypes.BIGINT()),
+                                DataTypes.MAP(DataTypes.DECIMAL(4, 2), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.DECIMAL(6, 3), DataTypes.INT()))
+                        // compatible key types are generalized to their common type (like for
+                        // MAP_UNION) and both maps are cast to it, so key 1 (INT) and key 1
+                        // (BIGINT) are the same key of the merged map
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f0, f1, (k, v1, v2) ->"
+                                        + " IFNULL(v1, CAST(0 AS BIGINT)) + IFNULL(v2, CAST(0 AS BIGINT)))",
+                                CollectionUtil.map(entry(1L, 11L), entry(2L, 2L), entry(3L, 30L)),
+                                DataTypes.MAP(DataTypes.BIGINT(), DataTypes.BIGINT().notNull()))
+                        // the same generalization for DECIMALs of different precision and scale:
+                        // 1.20 and 1.200 become the same DECIMAL(6, 3) key
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f2, f3, (k, v1, v2) -> IFNULL(v1, 0) + IFNULL(v2, 0))",
+                                CollectionUtil.map(entry(new BigDecimal("1.200"), 3)),
+                                DataTypes.MAP(DataTypes.DECIMAL(6, 3), DataTypes.INT().notNull())),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_ZIP_WITH)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry("a", 1), entry("b", 2)),
+                                CollectionUtil.map(entry((String) null, 1), entry("a", 2)),
+                                CollectionUtil.map(entry((String) null, 10), entry("b", 20)))
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // an empty map cannot be passed as input data (fromValues cannot infer the
+                        // type of an empty map literal), so it is derived with a filter that keeps
+                        // nothing
+                        // both maps empty: the key union is empty, so the lambda is never applied
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(MAP_FILTER(f0, (k, v) -> FALSE), "
+                                        + "MAP_FILTER(f0, (k, v) -> FALSE), (k, v1, v2) -> v1 + v2)",
+                                CollectionUtil.map(),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // only the first map is empty: the union is the second map's key set
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(MAP_FILTER(f0, (k, v) -> FALSE), f0, "
+                                        + "(k, v1, v2) -> IFNULL(v1, v2))",
+                                CollectionUtil.map(entry("a", 1), entry("b", 2)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // only the second map is empty: the union keeps the first map's key order
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f0, MAP_FILTER(f0, (k, v) -> FALSE), "
+                                        + "(k, v1, v2) -> IFNULL(v1, v2))",
+                                CollectionUtil.map(entry("a", 1), entry("b", 2)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                        // a NULL key is a key like any other: it merges across both maps and is
+                        // indistinguishable in the lambda from an absent key, which also passes
+                        // NULL for the value
+                        .testSqlResult(
+                                "MAP_ZIP_WITH(f1, f2, (k, v1, v2) -> IFNULL(v1, v2))",
+                                CollectionUtil.map(
+                                        entry((String) null, 1), entry("a", 2), entry("b", 20)),
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())));
+    }
+
+    /**
+     * Map keys use SQL logical equality (value equality), not Java object identity. {@code
+     * MAP_TRANSFORM_KEYS} duplicate detection and {@code MAP_ZIP_WITH} key union must therefore
+     * treat two separately allocated but value-equal keys as the same key. This is exercised with
+     * {@code BINARY} keys (distinct {@code byte[]} instances with equal content, which compare by
+     * identity under Java {@code equals}), with a complex {@code ARRAY} key (which additionally
+     * validates that the generated key wrapper -- see {@code
+     * ExprCodeGenerator#generateMapKeyWrapperClass} -- compiles and runs for a structured key
+     * type), and with signed floating zero ({@code 0.0} and {@code -0.0}, which are equal under SQL
+     * equality but whose naive {@code Double#hashCode} differs -- see {@code
+     * CodeGenUtils#hashCodeForType}).
+     */
+    private Stream<TestSetSpec> mapLogicalKeyEqualityTestCases() {
+        return Stream.of(
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_TRANSFORM_KEYS)
+                        .onFieldsWithData(
+                                CollectionUtil.map(
+                                        entry(1, new byte[] {0x0A}), entry(2, new byte[] {0x0A})),
+                                CollectionUtil.map(
+                                        entry(1, new byte[] {0x0A}), entry(2, new byte[] {0x0B})))
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.BYTES()),
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.BYTES()))
+                        // two value-equal BINARY keys (distinct byte[] instances) collide -> the
+                        // transform produces a duplicate key and fails
+                        .testSqlRuntimeError(
+                                "MAP_TRANSFORM_KEYS(f0, (k, v) -> v)",
+                                "MAP_TRANSFORM_KEYS produced a duplicate key")
+                        // control: value-distinct BINARY keys do NOT collide -> both survive
+                        .testSqlResult(
+                                "CARDINALITY(MAP_TRANSFORM_KEYS(f1, (k, v) -> v))",
+                                2,
+                                DataTypes.INT()),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_ZIP_WITH)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry(new byte[] {0x0A}, 1)),
+                                CollectionUtil.map(entry(new byte[] {0x0A}, 2)),
+                                CollectionUtil.map(entry(new byte[] {0x0B}, 2)))
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.BYTES(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.BYTES(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.BYTES(), DataTypes.INT()))
+                        // value-equal BINARY keys in both maps merge into a single union entry
+                        .testSqlResult(
+                                "CARDINALITY(MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2))",
+                                1,
+                                DataTypes.INT())
+                        // control: value-distinct BINARY keys stay separate -> two union entries
+                        .testSqlResult(
+                                "CARDINALITY(MAP_ZIP_WITH(f0, f2, (k, v1, v2) -> v1 + v2))",
+                                2,
+                                DataTypes.INT()),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_TRANSFORM_KEYS)
+                        .onFieldsWithData(CollectionUtil.map(entry(1, 0.0d), entry(2, -0.0d)))
+                        .andDataTypes(DataTypes.MAP(DataTypes.INT(), DataTypes.DOUBLE()))
+                        // 0.0 and -0.0 are logically equal keys -> the transform produces a
+                        // duplicate key even though their naive Double#hashCode differs
+                        .testSqlRuntimeError(
+                                "MAP_TRANSFORM_KEYS(f0, (k, v) -> v)",
+                                "MAP_TRANSFORM_KEYS produced a duplicate key"),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_ZIP_WITH)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry(0.0d, 1)),
+                                CollectionUtil.map(entry(-0.0d, 2)))
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.DOUBLE(), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.DOUBLE(), DataTypes.INT()))
+                        // signed-zero keys from separate maps merge into a single union entry
+                        .testSqlResult(
+                                "CARDINALITY(MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2))",
+                                1,
+                                DataTypes.INT()),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_ZIP_WITH)
+                        .onFieldsWithData(
+                                CollectionUtil.map(entry(new Integer[] {1, 2}, 10)),
+                                CollectionUtil.map(entry(new Integer[] {1, 2}, 20)))
+                        .andDataTypes(
+                                DataTypes.MAP(DataTypes.ARRAY(DataTypes.INT()), DataTypes.INT()),
+                                DataTypes.MAP(DataTypes.ARRAY(DataTypes.INT()), DataTypes.INT()))
+                        // value-equal complex (ARRAY) keys merge into a single union entry, which
+                        // exercises the generated key wrapper for a structured key type
+                        .testSqlResult(
+                                "CARDINALITY(MAP_ZIP_WITH(f0, f1, (k, v1, v2) -> v1 + v2))",
+                                1,
+                                DataTypes.INT()));
+    }
+
     /**
      * A higher-order call nested in another one's lambda body closes over the enclosing lambda's
      * parameter, so the inner call's return type is still {@code ANY} when its enclosing {@code
      * ARRAY_TRANSFORM} first derives its own result type. The enclosing function must defer
-     * building its {@code ARRAY<...>} result type until the inner return type resolves, otherwise
-     * validation fails with "Type is not supported: ANY" (see {@code
-     * TypeInferenceOperandChecker#capturesUnresolvedLambdaParameter}). Covers the
-     * lambda-result-derived return strategy of {@code ARRAY_ZIP_WITH}.
+     * building its {@code ARRAY<...>}/{@code MAP<...>} result type until the inner return type
+     * resolves, otherwise validation fails with "Type is not supported: ANY" (see {@code
+     * TypeInferenceOperandChecker#capturesUnresolvedLambdaParameter}). Covers every
+     * lambda-result-derived return strategy: {@code ARRAY_ZIP_WITH}, {@code MAP_TRANSFORM_KEYS},
+     * {@code MAP_TRANSFORM_VALUES} and {@code MAP_ZIP_WITH}.
      */
     private Stream<TestSetSpec> nestedLambdaAnyReturnTestCases() {
         return Stream.of(
@@ -377,6 +708,59 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 new Integer[][] {new Integer[] {5, 5}, new Integer[] {6, 6}},
                                 DataTypes.ARRAY(
                                                 DataTypes.ARRAY(DataTypes.INT().notNull())
+                                                        .notNull())
+                                        .notNull()),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_TRANSFORM_KEYS)
+                        .onFieldsWithData((Object) new Integer[] {5, 6})
+                        .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
+                        // the inner MAP_TRANSFORM_KEYS replaces each key with the enclosing element
+                        // x
+                        .testSqlResult(
+                                "ARRAY_TRANSFORM(f0, x -> "
+                                        + "MAP_TRANSFORM_KEYS(MAP[1, 'a'], (k, v) -> x))",
+                                new java.util.Map[] {
+                                    CollectionUtil.map(entry(5, "a")),
+                                    CollectionUtil.map(entry(6, "a"))
+                                },
+                                DataTypes.ARRAY(
+                                                DataTypes.MAP(
+                                                                DataTypes.INT().notNull(),
+                                                                DataTypes.CHAR(1).notNull())
+                                                        .notNull())
+                                        .notNull()),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_TRANSFORM_VALUES)
+                        .onFieldsWithData((Object) new Integer[] {5, 6})
+                        .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
+                        // the inner MAP_TRANSFORM_VALUES replaces each value with the enclosing x
+                        .testSqlResult(
+                                "ARRAY_TRANSFORM(f0, x -> "
+                                        + "MAP_TRANSFORM_VALUES(MAP['a', 1], (k, v) -> x))",
+                                new java.util.Map[] {
+                                    CollectionUtil.map(entry("a", 5)),
+                                    CollectionUtil.map(entry("a", 6))
+                                },
+                                DataTypes.ARRAY(
+                                                DataTypes.MAP(
+                                                                DataTypes.CHAR(1).notNull(),
+                                                                DataTypes.INT().notNull())
+                                                        .notNull())
+                                        .notNull()),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.MAP_ZIP_WITH)
+                        .onFieldsWithData((Object) new Integer[] {5, 6})
+                        .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
+                        // the inner MAP_ZIP_WITH body is the enclosing element x for every key
+                        .testSqlResult(
+                                "ARRAY_TRANSFORM(f0, x -> "
+                                        + "MAP_ZIP_WITH(MAP['a', 1], MAP['b', 2], "
+                                        + "(k, v1, v2) -> x))",
+                                new java.util.Map[] {
+                                    CollectionUtil.map(entry("a", 5), entry("b", 5)),
+                                    CollectionUtil.map(entry("a", 6), entry("b", 6))
+                                },
+                                DataTypes.ARRAY(
+                                                DataTypes.MAP(
+                                                                DataTypes.CHAR(1).notNull(),
+                                                                DataTypes.INT().notNull())
                                                         .notNull())
                                         .notNull()));
     }

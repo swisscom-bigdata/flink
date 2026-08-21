@@ -180,8 +180,18 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
         // leave it unqualified, while a column the body captures is qualified like any other.
         List<Row> data =
                 Arrays.asList(
-                        Row.of(1L, new Integer[] {1, 2, 3}, 10, "2024-01-01"),
-                        Row.of(2L, new Integer[] {4, 5}, 20, "2024-01-02"));
+                        Row.of(
+                                1L,
+                                new Integer[] {1, 2, 3},
+                                Collections.singletonMap("a", 1),
+                                10,
+                                "2024-01-01"),
+                        Row.of(
+                                2L,
+                                new Integer[] {4, 5},
+                                Collections.singletonMap("b", 2),
+                                20,
+                                "2024-01-02"));
         String dataId = TestValuesTableFactory.registerData(data);
         OperationHandle sourceHandle =
                 executeStatement(
@@ -189,6 +199,7 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
                                 "CREATE TABLE hof_source (\n"
                                         + "  id BIGINT,\n"
                                         + "  vals ARRAY<INT>,\n"
+                                        + "  props MAP<STRING, INT>,\n"
                                         + "  base INT,\n"
                                         + "  ds STRING\n"
                                         + ")\n"
@@ -213,6 +224,7 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
                         + "  ARRAY_FILTER(vals, x -> x > 1) AS big_vals,\n"
                         + "  ARRAY_TRANSFORM(vals, x -> x + base) AS shifted_vals,\n"
                         + "  ARRAY_REDUCE(vals, 0, (acc, x) -> acc + x) AS total,\n"
+                        + "  MAP_TRANSFORM_VALUES(props, (k, v) -> v * 100) AS scaled_props,\n"
                         + "  ds\n"
                         + " FROM hof_source";
         OperationHandle materializedTableHandle = executeStatement(materializedTableDDL);
@@ -231,6 +243,9 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
                                         Column.physical(
                                                 "shifted_vals", DataTypes.ARRAY(DataTypes.INT())),
                                         Column.physical("total", DataTypes.INT()),
+                                        Column.physical(
+                                                "scaled_props",
+                                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
                                         Column.physical("ds", DataTypes.STRING()))));
         assertThat(materializedTable.getRefreshMode()).isSameAs(RefreshMode.CONTINUOUS);
         // the materialized-table expansion re-parses the unparsed statement, which turns every
@@ -244,6 +259,7 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
                                         + " `ARRAY_FILTER`(`hof_source`.`vals`, `x` -> `x` > 1) AS `big_vals`,"
                                         + " `ARRAY_TRANSFORM`(`hof_source`.`vals`, `x` -> `x` + `hof_source`.`base`) AS `shifted_vals`,"
                                         + " `ARRAY_REDUCE`(`hof_source`.`vals`, 0, (`acc`, `x`) -> `acc` + `x`) AS `total`,"
+                                        + " `MAP_TRANSFORM_VALUES`(`hof_source`.`props`, (`k`, `v`) -> `v` * 100) AS `scaled_props`,"
                                         + " `hof_source`.`ds`\n"
                                         + "FROM `%s`.`%s`.`hof_source` AS `hof_source`",
                                 fileSystemCatalogName, TEST_DEFAULT_DATABASE));
@@ -258,7 +274,7 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
         List<RowData> rows =
                 fetchTableData(
                                 sessionHandle,
-                                "SELECT id, big_vals, shifted_vals, total, ds"
+                                "SELECT id, big_vals, shifted_vals, total, scaled_props, ds"
                                         + " FROM users_shops")
                         .stream()
                         .sorted(Comparator.comparingLong(row -> row.getLong(0)))
@@ -267,12 +283,16 @@ class MaterializedTableStatementITCase extends AbstractMaterializedTableStatemen
         assertThat(rows.get(0).getArray(1).toIntArray()).containsExactly(2, 3);
         assertThat(rows.get(0).getArray(2).toIntArray()).containsExactly(11, 12, 13);
         assertThat(rows.get(0).getInt(3)).isEqualTo(6);
-        assertThat(rows.get(0).getString(4)).hasToString("2024-01-01");
+        assertThat(rows.get(0).getMap(4).keyArray().getString(0)).hasToString("a");
+        assertThat(rows.get(0).getMap(4).valueArray().getInt(0)).isEqualTo(100);
+        assertThat(rows.get(0).getString(5)).hasToString("2024-01-01");
 
         assertThat(rows.get(1).getArray(1).toIntArray()).containsExactly(4, 5);
         assertThat(rows.get(1).getArray(2).toIntArray()).containsExactly(24, 25);
         assertThat(rows.get(1).getInt(3)).isEqualTo(9);
-        assertThat(rows.get(1).getString(4)).hasToString("2024-01-02");
+        assertThat(rows.get(1).getMap(4).keyArray().getString(0)).hasToString("b");
+        assertThat(rows.get(1).getMap(4).valueArray().getInt(0)).isEqualTo(200);
+        assertThat(rows.get(1).getString(5)).hasToString("2024-01-02");
     }
 
     @Test

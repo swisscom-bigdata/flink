@@ -1,0 +1,154 @@
+{
+  "flinkVersion" : "2.4",
+  "nodes" : [ {
+    "id" : 13,
+    "type" : "stream-exec-table-source-scan_2",
+    "scanTableSource" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`source_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "m1",
+              "dataType" : "MAP<VARCHAR(2147483647), INT>"
+            }, {
+              "name" : "m2",
+              "dataType" : "MAP<VARCHAR(2147483647), INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "outputType" : "ROW<`m1` MAP<VARCHAR(2147483647), INT>, `m2` MAP<VARCHAR(2147483647), INT>>",
+    "description" : "TableSourceScan(table=[[default_catalog, default_database, source_t]], fields=[m1, m2])"
+  }, {
+    "id" : 14,
+    "type" : "stream-exec-calc_1",
+    "projection" : [ {
+      "kind" : "CALL",
+      "internalName" : "$MAP_ZIP_WITH$1",
+      "operands" : [ {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 0,
+        "type" : "MAP<VARCHAR(2147483647), INT>"
+      }, {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 1,
+        "type" : "MAP<VARCHAR(2147483647), INT>"
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "k",
+          "index" : 0,
+          "type" : "VARCHAR(2147483647)"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "v1",
+          "index" : 1,
+          "type" : "INT"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "v2",
+          "index" : 2,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$+$1",
+          "operands" : [ {
+            "kind" : "CALL",
+            "internalName" : "$COALESCE$1",
+            "operands" : [ {
+              "kind" : "LAMBDA_REF",
+              "name" : "v1",
+              "index" : 1,
+              "type" : "INT"
+            }, {
+              "kind" : "LITERAL",
+              "value" : 0,
+              "type" : "INT NOT NULL"
+            } ],
+            "type" : "INT NOT NULL"
+          }, {
+            "kind" : "CALL",
+            "internalName" : "$COALESCE$1",
+            "operands" : [ {
+              "kind" : "LAMBDA_REF",
+              "name" : "v2",
+              "index" : 2,
+              "type" : "INT"
+            }, {
+              "kind" : "LITERAL",
+              "value" : 0,
+              "type" : "INT NOT NULL"
+            } ],
+            "type" : "INT NOT NULL"
+          } ],
+          "type" : "INT NOT NULL"
+        }
+      } ],
+      "type" : "MAP<VARCHAR(2147483647), INT NOT NULL>"
+    } ],
+    "condition" : null,
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` MAP<VARCHAR(2147483647), INT NOT NULL>>",
+    "description" : "Calc(select=[MAP_ZIP_WITH(m1, m2, (k, v1, v2) -> (COALESCE(v1, 0) + COALESCE(v2, 0))) AS EXPR$0])"
+  }, {
+    "id" : 15,
+    "type" : "stream-exec-sink_2",
+    "configuration" : {
+      "table.exec.sink.keyed-shuffle" : "AUTO",
+      "table.exec.sink.not-null-enforcer" : "ERROR",
+      "table.exec.sink.rowtime-inserter" : "ENABLED",
+      "table.exec.sink.type-length-enforcer" : "IGNORE",
+      "table.exec.sink.upsert-materialize" : "AUTO"
+    },
+    "dynamicTableSink" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`sink_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "m",
+              "dataType" : "MAP<VARCHAR(2147483647), INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "inputChangelogMode" : [ "INSERT" ],
+    "upsertMaterializeStrategy" : "VALUE",
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` MAP<VARCHAR(2147483647), INT NOT NULL>>",
+    "description" : "Sink(table=[default_catalog.default_database.sink_t], fields=[EXPR$0])"
+  } ],
+  "edges" : [ {
+    "source" : 13,
+    "target" : 14,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  }, {
+    "source" : 14,
+    "target" : 15,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  } ]
+}

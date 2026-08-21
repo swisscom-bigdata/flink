@@ -242,6 +242,68 @@ public final class SpecificTypeStrategies {
                 return Optional.of(nullable ? result.nullable() : result.notNull());
             };
 
+    /**
+     * Type strategy specific for {@link BuiltInFunctionDefinitions#MAP_TRANSFORM_KEYS}. The result
+     * is a map whose key type is the result type of the lambda (the second argument) and whose
+     * value type is unchanged. The map is nullable if the input map is nullable.
+     */
+    public static final TypeStrategy MAP_TRANSFORM_KEYS =
+            TypeStrategies.nullableIfArgs(
+                    ConstantArgumentCount.of(0),
+                    callContext -> {
+                        final List<DataType> args = callContext.getArgumentDataTypes();
+                        final org.apache.flink.table.types.logical.LogicalType lambdaResultType =
+                                LambdaStrategyUtils.requireLambdaResultType(callContext, 1);
+                        final DataType valueType =
+                                ((org.apache.flink.table.types.KeyValueDataType) args.get(0))
+                                        .getValueDataType();
+                        return Optional.of(
+                                DataTypes.MAP(DataTypes.of(lambdaResultType), valueType));
+                    });
+
+    /**
+     * Type strategy specific for {@link BuiltInFunctionDefinitions#MAP_TRANSFORM_VALUES}. The
+     * result is a map whose value type is the result type of the lambda (the second argument) and
+     * whose key type is unchanged. The map is nullable if the input map is nullable.
+     */
+    public static final TypeStrategy MAP_TRANSFORM_VALUES =
+            TypeStrategies.nullableIfArgs(
+                    ConstantArgumentCount.of(0),
+                    callContext -> {
+                        final List<DataType> args = callContext.getArgumentDataTypes();
+                        final org.apache.flink.table.types.logical.LogicalType lambdaResultType =
+                                LambdaStrategyUtils.requireLambdaResultType(callContext, 1);
+                        final DataType keyType =
+                                ((org.apache.flink.table.types.KeyValueDataType) args.get(0))
+                                        .getKeyDataType();
+                        return Optional.of(DataTypes.MAP(keyType, DataTypes.of(lambdaResultType)));
+                    });
+
+    /**
+     * Type strategy specific for {@link BuiltInFunctionDefinitions#MAP_ZIP_WITH}. The result is a
+     * map whose key type is the input maps' common key type and whose value type is the result type
+     * of the lambda (the third argument). The map is nullable if either input map is nullable.
+     */
+    public static final TypeStrategy MAP_ZIP_WITH =
+            callContext -> {
+                final List<DataType> args = callContext.getArgumentDataTypes();
+                final org.apache.flink.table.types.logical.LogicalType lambdaResultType =
+                        LambdaStrategyUtils.requireLambdaResultType(callContext, 2);
+                final Optional<DataType> keyType =
+                        MapHigherOrderFunctionInputTypeStrategy.commonKeyType(
+                                (org.apache.flink.table.types.KeyValueDataType) args.get(0),
+                                (org.apache.flink.table.types.KeyValueDataType) args.get(1));
+                if (!keyType.isPresent()) {
+                    return Optional.empty();
+                }
+                final boolean nullable =
+                        args.get(0).getLogicalType().isNullable()
+                                || args.get(1).getLogicalType().isNullable();
+                final DataType result =
+                        DataTypes.MAP(keyType.get(), DataTypes.of(lambdaResultType));
+                return Optional.of(nullable ? result.nullable() : result.notNull());
+            };
+
     /** Type strategy specific for {@link BuiltInFunctionDefinitions#OBJECT_OF}. */
     public static final TypeStrategy OBJECT_OF = new ObjectOfTypeStrategy();
 

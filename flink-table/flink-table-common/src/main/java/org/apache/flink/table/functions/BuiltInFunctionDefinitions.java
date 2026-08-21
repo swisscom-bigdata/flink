@@ -115,6 +115,9 @@ import static org.apache.flink.table.types.inference.strategies.SpecificInputTyp
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.INDEX;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.JSON_ARGUMENT;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.LATERAL_SNAPSHOT_INPUT_TYPE_STRATEGY;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.MAP_FILTER_INPUT;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.MAP_TRANSFORM_INPUT;
+import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.MAP_ZIP_WITH_INPUT;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.ML_PREDICT_INPUT_TYPE_STRATEGY;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.TO_CHANGELOG_INPUT_TYPE_STRATEGY;
 import static org.apache.flink.table.types.inference.strategies.SpecificInputTypeStrategies.TWO_EQUALS_COMPARABLE;
@@ -404,6 +407,46 @@ public final class BuiltInFunctionDefinitions {
                     .outputTypeStrategy(SpecificTypeStrategies.ARRAY_ZIP_WITH)
                     .runtimeClass(
                             "org.apache.flink.table.runtime.functions.scalar.ArrayZipWithFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition MAP_FILTER =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("MAP_FILTER")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(MAP_FILTER_INPUT)
+                    .outputTypeStrategy(nullableIfArgs(ConstantArgumentCount.of(0), argument(0)))
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.MapFilterFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition MAP_TRANSFORM_KEYS =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("MAP_TRANSFORM_KEYS")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(MAP_TRANSFORM_INPUT)
+                    .outputTypeStrategy(SpecificTypeStrategies.MAP_TRANSFORM_KEYS)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.MapTransformKeysFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition MAP_TRANSFORM_VALUES =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("MAP_TRANSFORM_VALUES")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(MAP_TRANSFORM_INPUT)
+                    .outputTypeStrategy(SpecificTypeStrategies.MAP_TRANSFORM_VALUES)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.MapTransformValuesFunction")
+                    .build();
+
+    public static final BuiltInFunctionDefinition MAP_ZIP_WITH =
+            BuiltInFunctionDefinition.newBuilder()
+                    .name("MAP_ZIP_WITH")
+                    .kind(SCALAR)
+                    .inputTypeStrategy(MAP_ZIP_WITH_INPUT)
+                    .outputTypeStrategy(SpecificTypeStrategies.MAP_ZIP_WITH)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.MapZipWithFunction")
                     .build();
 
     public static final BuiltInFunctionDefinition ARRAY_SLICE =

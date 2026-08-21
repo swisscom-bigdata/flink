@@ -181,7 +181,17 @@ class FunctionCatalogTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"ARRAY_TRANSFORM", "ARRAY_FILTER", "ARRAY_REDUCE", "ARRAY_ZIP_WITH"})
+    @ValueSource(
+            strings = {
+                "ARRAY_TRANSFORM",
+                "ARRAY_FILTER",
+                "ARRAY_REDUCE",
+                "ARRAY_ZIP_WITH",
+                "MAP_FILTER",
+                "MAP_TRANSFORM_KEYS",
+                "MAP_TRANSFORM_VALUES",
+                "MAP_ZIP_WITH"
+            })
     void testBuiltInHigherOrderFunctionNameCollision(String builtInName) throws Exception {
         // Regression guard for FLINK-31207: the new higher-order built-ins become reserved
         // system-function names. This pins the resolution precedence the FLIP

@@ -1,0 +1,119 @@
+{
+  "flinkVersion" : "2.4",
+  "nodes" : [ {
+    "id" : 16,
+    "type" : "batch-exec-table-source-scan_1",
+    "scanTableSource" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`source_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "m",
+              "dataType" : "MAP<VARCHAR(2147483647), INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "outputType" : "ROW<`m` MAP<VARCHAR(2147483647), INT>>",
+    "description" : "TableSourceScan(table=[[default_catalog, default_database, source_t]], fields=[m])",
+    "dynamicFilteringDataListenerID" : "91eb51d5-581c-4e4f-b514-867c653c0ecc"
+  }, {
+    "id" : 17,
+    "type" : "batch-exec-calc_1",
+    "projection" : [ {
+      "kind" : "CALL",
+      "internalName" : "$MAP_TRANSFORM_KEYS$1",
+      "operands" : [ {
+        "kind" : "INPUT_REF",
+        "inputIndex" : 0,
+        "type" : "MAP<VARCHAR(2147483647), INT>"
+      }, {
+        "kind" : "LAMBDA",
+        "parameters" : [ {
+          "kind" : "LAMBDA_REF",
+          "name" : "k",
+          "index" : 0,
+          "type" : "VARCHAR(2147483647)"
+        }, {
+          "kind" : "LAMBDA_REF",
+          "name" : "v",
+          "index" : 1,
+          "type" : "INT"
+        } ],
+        "expr" : {
+          "kind" : "CALL",
+          "syntax" : "BINARY",
+          "internalName" : "$||$1",
+          "operands" : [ {
+            "kind" : "LAMBDA_REF",
+            "name" : "k",
+            "index" : 0,
+            "type" : "VARCHAR(2147483647)"
+          }, {
+            "kind" : "LITERAL",
+            "value" : "!",
+            "type" : "CHAR(1) NOT NULL"
+          } ],
+          "type" : "VARCHAR(2147483647)"
+        }
+      } ],
+      "type" : "MAP<VARCHAR(2147483647), INT>"
+    } ],
+    "condition" : null,
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "PIPELINED",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` MAP<VARCHAR(2147483647), INT>>",
+    "description" : "Calc(select=[MAP_TRANSFORM_KEYS(m, (k, v) -> ||(k, '!')) AS EXPR$0])"
+  }, {
+    "id" : 18,
+    "type" : "batch-exec-sink_1",
+    "configuration" : {
+      "table.exec.sink.not-null-enforcer" : "ERROR",
+      "table.exec.sink.type-length-enforcer" : "IGNORE"
+    },
+    "dynamicTableSink" : {
+      "table" : {
+        "identifier" : "`default_catalog`.`default_database`.`sink_t`",
+        "resolvedTable" : {
+          "schema" : {
+            "columns" : [ {
+              "name" : "m",
+              "dataType" : "MAP<VARCHAR(2147483647), INT>"
+            } ]
+          }
+        }
+      }
+    },
+    "inputProperties" : [ {
+      "requiredDistribution" : {
+        "type" : "UNKNOWN"
+      },
+      "damBehavior" : "BLOCKING",
+      "priority" : 0
+    } ],
+    "outputType" : "ROW<`EXPR$0` MAP<VARCHAR(2147483647), INT>>",
+    "description" : "Sink(table=[default_catalog.default_database.sink_t], fields=[EXPR$0])"
+  } ],
+  "edges" : [ {
+    "source" : 16,
+    "target" : 17,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  }, {
+    "source" : 17,
+    "target" : 18,
+    "shuffle" : {
+      "type" : "FORWARD"
+    },
+    "shuffleMode" : "PIPELINED"
+  } ]
+}
