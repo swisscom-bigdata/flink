@@ -1714,6 +1714,7 @@ under the License.
 						<inputExclude>**/flink-bin/conf/masters</inputExclude>
 						<!-- Administrative files in the main trunk. -->
 						<inputExclude>**/README.md</inputExclude>
+						<inputExclude>FLIP-*.md</inputExclude>
 						<inputExclude>.github/**</inputExclude>
 						<!-- Build files -->
 						<inputExclude>**/*.iml</inputExclude>
