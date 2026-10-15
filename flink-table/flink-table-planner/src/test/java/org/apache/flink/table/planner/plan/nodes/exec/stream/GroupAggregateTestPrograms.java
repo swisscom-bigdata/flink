@@ -110,7 +110,17 @@ public class GroupAggregateTestPrograms {
             TableTestProgram.of(
                             "group-aggregate-simple-mini-batch",
                             "validates basic aggregation using group by with mini batch")
-                    .setupTableSource(SOURCE_ONE)
+                    // See GROUP_BY_DISTINCT_MINI_BATCH for why only one row per group key is
+                    // produced after restore.
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SOURCE_ONE.schemaComponents)
+                                    .producedBeforeRestore(
+                                            SOURCE_ONE.dataBeforeRestore.toArray(new Row[0]))
+                                    .producedAfterRestore(
+                                            Row.of(1, 1L, "Hi Again!"),
+                                            Row.of(2, 2L, "Hello Again!"))
+                                    .build())
                     .setupConfig(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED, true)
                     .setupConfig(
                             ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ALLOW_LATENCY,
@@ -126,7 +136,7 @@ public class GroupAggregateTestPrograms {
                                     .consumedBeforeRestore(
                                             "+I[1, 1, null, Hi]", "+I[2, 2, 2.0, Hello]")
                                     .consumedAfterRestore(
-                                            "+U[1, 2, null, Hi]", "+U[2, 4, 2.0, Hello]")
+                                            "+U[1, 2, null, Hi]", "+U[2, 3, 2.0, Hello]")
                                     .build())
                     .runSql(GroupAggregateTestPrograms.GROUP_BY_SIMPLE.getRunSqlTestStep().sql)
                     .build();
@@ -191,7 +201,20 @@ public class GroupAggregateTestPrograms {
                             ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ALLOW_LATENCY,
                             Duration.ofSeconds(10))
                     .setupConfig(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE, 5L)
-                    .setupTableSource(SOURCE_TWO)
+                    // The compiled plan uses a processing-time mini-batch interval, so a flush
+                    // may happen at any point after restore. Producing at most one row per group
+                    // key keeps the emitted changelog independent of the flush boundaries.
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SOURCE_TWO.schemaComponents)
+                                    .producedBeforeRestore(
+                                            SOURCE_TWO.dataBeforeRestore.toArray(new Row[0]))
+                                    .producedAfterRestore(
+                                            Row.of(1, 1L, 0, "Hello", 1L),
+                                            Row.of(3, 5L, 4, "ABC", 2L),
+                                            Row.of(7, 7L, 7, "MNO", 7L),
+                                            Row.of(3, 6L, 5, "BCD", 3L))
+                                    .build())
                     .setupTableSink(
                             SinkTestStep.newBuilder("sink_t")
                                     .addSchema(
@@ -208,7 +231,7 @@ public class GroupAggregateTestPrograms {
                                     .consumedAfterRestore(
                                             "+U[3, 1, 2, 8, 31, 9.0, 3]",
                                             "+U[2, 1, 4, 14, 57, 7.0, 7]",
-                                            "+I[7, 0, 1, 7, 7, 7.0, 2]",
+                                            "+I[7, 0, 1, 7, 7, 7.0, 1]",
                                             "+U[1, 1, 4, 12, 32, 5.0, 5]")
                                     .build())
                     .runSql(GROUP_BY_DISTINCT.getRunSqlTestStep().sql)
