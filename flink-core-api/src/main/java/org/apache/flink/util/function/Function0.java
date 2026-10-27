@@ -25,13 +25,8 @@ import java.util.function.Supplier;
 /**
  * Function which takes no arguments.
  *
- * <p>This is the arity-0 member of the {@code FunctionN} family. It extends {@link Supplier} so
- * that the received object can be handed to APIs expecting one, mirroring how {@link Function1},
- * {@link Function2} and {@link Function3} relate to their {@code java.util.function} counterparts.
- *
- * <p>{@link #apply()} is the single abstract method, so that a lambda argument of any arity is
- * generated the same way; {@link #get()} is a default that delegates to it. A user-defined function
- * may therefore declare its zero-parameter lambda argument as either this type or {@link Supplier}.
+ * <p>It extends {@link Supplier} so that it can be passed to APIs that expect one. As in every
+ * {@code FunctionN}, {@link #apply()} is the abstract method; {@link #get()} calls it.
  *
  * @param <R> type of the return value
  */

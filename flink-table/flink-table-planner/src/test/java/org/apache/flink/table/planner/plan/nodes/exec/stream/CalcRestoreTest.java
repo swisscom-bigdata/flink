@@ -50,6 +50,7 @@ public class CalcRestoreTest extends RestoreTestBase {
                 CalcTestPrograms.CALC_ARRAY_FILTER,
                 CalcTestPrograms.CALC_ARRAY_REDUCE,
                 CalcTestPrograms.CALC_ARRAY_ZIP_WITH,
-                CalcTestPrograms.CALC_ARRAY_TRANSFORM_CAPTURE);
+                CalcTestPrograms.CALC_ARRAY_TRANSFORM_CAPTURE,
+                CalcTestPrograms.CALC_ARRAY_TRANSFORM_NESTED);
     }
 }

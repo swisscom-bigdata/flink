@@ -2,6 +2,7 @@
 title: "Higher-Order"
 weight: 10
 type: docs
+bookCollapseSection: true
 sqlFunctions: higherorder
 ---
 <!--
@@ -25,8 +26,8 @@ under the License.
 
 # Higher-Order Functions
 
-Higher-order functions take a *lambda expression* as an argument and apply it to the elements or
-entries of an `ARRAY` or `MAP`.
+Higher-order functions take a *lambda expression* as an argument and apply it to the elements of an
+`ARRAY`.
 
 A lambda is an anonymous function written `parameter -> body` (or `(parameter1, parameter2) -> body`
 for more than one parameter). Its parameter types are derived from the collection the function is
@@ -68,16 +69,43 @@ SELECT ARRAY_TRANSFORM(vals, x -> x + SUM(base) OVER ()) FROM t;
 SELECT ARRAY_TRANSFORM(vals, x -> x + (SELECT MAX(base) FROM t)) FROM t;
 ```
 
+`CURRENT_WATERMARK`, `PROCTIME()` and the current time functions, such as `CURRENT_TIMESTAMP`, in a
+body are evaluated once per row as well, so all elements of a row see the same values.
+`CURRENT_WATERMARK` must be applied to a column of the query, not to a lambda parameter.
+
 Those constructs may not be evaluated over a lambda *parameter*, however: a parameter is a single
 element, not a set of rows, so `ARRAY_TRANSFORM(vals, x -> SUM(x))` is a validation error. Use
-`ARRAY_REDUCE` to fold an array's own elements. A table function cannot appear in a body either,
+`ARRAY_REDUCE` to fold an array's own elements. Inside a sub-query in a body, an unqualified name
+that matches a lambda parameter always refers to the parameter, even where the sub-query has a
+column of that name; qualify the sub-query's own column with its table alias (for example `q.x`)
+or rename the parameter. A table function cannot appear in a body either,
 since it produces rows rather than a value, nor can an asynchronous scalar function, whose result
 only arrives after the body has been evaluated. The Table API follows the same rules (it has no
 sub-query expression).
 
-Lambdas are only valid as arguments of higher-order functions; using one anywhere else is a
-validation error. They are not values: a lambda cannot be stored in a column, assigned to a
-variable, or returned from a query.
+In `ORDER BY`, a body sees the columns of the `FROM` clause, not the aliases of the select list. A
+name of the body that the select list uses as an alias for anything but the column of that name is
+rejected; write the aliased expression instead, or qualify the column with its table alias (for
+example `t.base`).
+
+A column that a `USING` or `NATURAL` join merges into one must be qualified in a body, even in the
+select list, where it may otherwise be written unqualified. Unqualified, it is reported as
+ambiguous. Use the column of the side whose value you need (for example `t1.base`), or
+`COALESCE(t1.base, t2.base)` after a `FULL` join.
+
+Lambdas are not supported in the clauses of `MATCH_RECOGNIZE` (`PARTITION BY`, `ORDER BY`,
+`MEASURES` and `DEFINE`). Compute the value in the input table of `MATCH_RECOGNIZE` instead, for
+example in a sub-query, and use its column there.
+
+Lambdas are only valid as arguments of higher-order functions. In SQL, a lambda anywhere other
+than a function argument is a parse error, and a lambda passed to a function that does not accept
+one at that position is a validation error. In the Table API, both are validation errors. Lambdas
+are not values: a lambda cannot be stored in a column, assigned to a variable, or returned from a
+query.
+
+`EXPLAIN` shows a lambda as written, with the values it reads from the query in its body. If a
+parameter has the same name as such a value, as the parameter `c` and the column `c` in
+`c -> c + t.c`, the plan shows the parameter renamed: `ARRAY_TRANSFORM(a, c_1 -> (c_1 + c))`.
 
 In the Table API the same functions are available as expression methods that take a host-language
 lambda. It receives the expression(s) for the lambda parameter(s) and returns the body expression:

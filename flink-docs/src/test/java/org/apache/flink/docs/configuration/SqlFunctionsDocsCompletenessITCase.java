@@ -38,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -55,6 +56,9 @@ class SqlFunctionsDocsCompletenessITCase {
 
     private static final List<String> SQL_FUNCTION_FILES =
             List.of("sql_functions.yml", "sql_functions_zh.yml");
+
+    /** The directory of the higher-order functions under {@code docs/data/functions}. */
+    private static final String HIGHER_ORDER_CATEGORY = "higher-order";
 
     @Test
     void testLambdaFunctionsAreDocumented() throws IOException {
@@ -82,11 +86,29 @@ class SqlFunctionsDocsCompletenessITCase {
                             file)
                     .isEmpty();
         }
+
+        final Path pages = docsDataDir().resolve("functions").resolve(HIGHER_ORDER_CATEGORY);
+        final List<String> withoutPage =
+                lambdaFunctions.stream()
+                        .filter(
+                                name ->
+                                        !Files.exists(
+                                                pages.resolve(
+                                                        name.toLowerCase(Locale.ROOT) + ".yml")))
+                        .collect(Collectors.toList());
+        assertThat(withoutPage)
+                .as(
+                        "Every built-in function that declares a lambda argument needs a page in %s.",
+                        pages)
+                .isEmpty();
+    }
+
+    private static Path docsDataDir() {
+        return Paths.get(Utils.getProjectRootDir(), "docs", "data").toAbsolutePath();
     }
 
     private static String readDocsData(String fileName) throws IOException {
-        final Path path =
-                Paths.get(Utils.getProjectRootDir(), "docs", "data", fileName).toAbsolutePath();
+        final Path path = docsDataDir().resolve(fileName);
         assertThat(Files.exists(path)).as("Expected %s to exist.", path).isTrue();
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }

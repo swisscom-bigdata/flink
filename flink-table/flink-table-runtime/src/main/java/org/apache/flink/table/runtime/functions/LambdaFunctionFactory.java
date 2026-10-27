@@ -35,10 +35,10 @@ import org.apache.flink.annotation.Internal;
 public interface LambdaFunctionFactory {
 
     /**
-     * Returns the function object handed to a user-defined higher-order function: the {@code
-     * org.apache.flink.util.function.FunctionN} matching the lambda's number of user-visible
-     * parameters, from {@link org.apache.flink.util.function.Function0} to {@link
-     * org.apache.flink.util.function.Function4}.
+     * Returns the function object handed to the higher-order function: the {@code
+     * org.apache.flink.util.function.FunctionN}, or the {@code
+     * org.apache.flink.table.data.FunctionDataN} for a function over internal data, matching the
+     * lambda's number of user-visible parameters, from zero to four.
      *
      * <p>The lifted captures are bound here rather than per application, so they are converted once
      * per function object while the returned object is applied once per element. The array holds

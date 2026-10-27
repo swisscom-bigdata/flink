@@ -31,14 +31,12 @@ import org.apache.flink.util.function.Function1;
 import org.apache.flink.util.function.Function2;
 import org.apache.flink.util.function.Function3;
 import org.apache.flink.util.function.Function4;
-import org.apache.flink.util.function.TriFunction;
 
 import javax.annotation.Nullable;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 
 /**
@@ -47,11 +45,9 @@ import java.util.function.Function;
  *
  * <p>The type carries the number of parameters the lambda accepts, because that is what determines
  * the runtime representation: a lambda with {@code N} parameters is a {@code FunctionN}, from
- * {@link Function0} to {@link Function4}. At arities one to three the equivalent {@link Function},
- * {@link BiFunction} and {@link TriFunction} are accepted as well, since {@link Function1}, {@link
- * Function2} and {@link Function3} merely extend them. The parameter types and the result type are
- * deliberately <i>not</i> part of the type. They are only needed for validation and type inference
- * and are exposed there through {@link
+ * {@link Function0} to {@link Function4}. The parameter types and the result type are deliberately
+ * <i>not</i> part of the type. They are only needed for validation and type inference and are
+ * exposed there through {@link
  * org.apache.flink.table.types.inference.CallContext#getLambdaArgument(int)}, in the same way that
  * {@link DescriptorType} leaves the described columns to {@code CallContext#getArgumentValue} and
  * {@link SymbolType} leaves the symbol to the value.
@@ -97,35 +93,23 @@ public final class FunctionType extends LogicalType {
     private static final boolean CANONICAL_NULLABILITY = true;
 
     /**
-     * The maximum number of parameters for which a runtime conversion class exists. Function types
-     * with more (or zero) parameters can still be constructed and planned, but their value cannot
-     * be handed to a user-defined function.
+     * The maximum number of parameters for which a runtime conversion class exists. A function type
+     * with more parameters occurs only internally, for a lambda that carries lifted captures (see
+     * {@link #ofUncheckedArity(int)}), and its value cannot be handed to a user-defined function.
      *
      * @see #getDefaultConversion()
      */
     public static final int MAX_CONVERTIBLE_PARAMETER_COUNT = 4;
 
-    // The conversion class of a lambda is its arity's functional interface, indexed by arity. The
-    // FunctionN family is the conversion class at every arity, so that one naming scheme covers the
-    // whole range: java.util.function has no zero- or four-argument type, so any scheme built on
-    // the JDK types alone would have to break uniformity exactly where a user is least able to
-    // guess the name. Raising the bound is a matter of adding the next FunctionN and FunctionDataN
-    // and extending these tables.
+    // The conversion class of a lambda is its arity's FunctionN, indexed by arity. One family
+    // covers the whole range because java.util.function has no interface with more than two
+    // parameters, and its zero-parameter Supplier names its method get() rather than apply().
+    // Function0 to Function2 extend Supplier, Function and BiFunction so that the generated object
+    // can be passed to APIs that expect them, but those JDK interfaces are not conversion classes,
+    // so the same rule holds at every arity. Raising the bound is a matter of adding the next
+    // FunctionN and FunctionDataN and extending these tables.
     private static final Class<?>[] CONVERSIONS = {
         Function0.class, Function1.class, Function2.class, Function3.class, Function4.class,
-    };
-
-    // Arities one to three additionally accept the equivalent JDK/Flink interface, which Function1,
-    // Function2 and Function3 extend and which a Java developer is more likely to reach for. Both
-    // spellings are supported conversions, so either may be declared on an eval() parameter and
-    // either may be named in a bridgedTo(...) call; the declared one is what the code generator
-    // implements. Arity zero has no alias: the generated object's method is always apply(), while
-    // the single abstract method of java.util.function.Supplier is get(), so Supplier cannot be the
-    // implemented interface. Function0 extends Supplier instead, which lets a function still
-    // declare a Supplier parameter and receive the generated Function0 for it -- but Supplier is
-    // not itself a supported conversion and cannot be bridged to.
-    private static final @Nullable Class<?>[] ALIAS_CONVERSIONS = {
-        null, Function.class, BiFunction.class, TriFunction.class, null,
     };
 
     // A function that works on internal data structures receives its lambda argument over internal
@@ -212,6 +196,11 @@ public final class FunctionType extends LogicalType {
      * The internal-data conversion class for a lambda of the given arity, falling back to the
      * one-parameter handle for an arity that has no functional interface (a lambda carrying lifted
      * captures).
+     *
+     * <p>Like the external fallback of {@link #getDefaultConversion()}, the fallback is only a
+     * placeholder, because every logical type must name a conversion class. It never reaches a
+     * function: the {@code FUNCTION} type that a function's type inference and {@code eval()} see
+     * excludes the lifted captures, so its arity always has a functional interface.
      */
     @Internal
     public static Class<?> internalConversionClass(int parameterCount) {
@@ -257,7 +246,6 @@ public final class FunctionType extends LogicalType {
 
     private boolean supportsConversion(Class<?> clazz) {
         return isAssignableFrom(conversionClass(false), clazz)
-                || isAssignableFrom(aliasConversionClass(), clazz)
                 || isAssignableFrom(conversionClass(true), clazz);
     }
 
@@ -294,17 +282,6 @@ public final class FunctionType extends LogicalType {
             return null;
         }
         return conversions[parameterCount];
-    }
-
-    /**
-     * The equivalent JDK or Flink interface accepted alongside this arity's {@code FunctionN}
-     * conversion class, or {@code null} where none exists.
-     */
-    private @Nullable Class<?> aliasConversionClass() {
-        if (parameterCount < 0 || parameterCount >= ALIAS_CONVERSIONS.length) {
-            return null;
-        }
-        return ALIAS_CONVERSIONS[parameterCount];
     }
 
     @Override

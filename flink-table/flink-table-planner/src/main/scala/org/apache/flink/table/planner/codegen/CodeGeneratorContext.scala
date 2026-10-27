@@ -862,12 +862,13 @@ class CodeGeneratorContext(
   /**
    * Code that constructs the [[FunctionContext]] used in the open() method of the generated class,
    * e.g. for opening an
-   * [[org.apache.flink.table.functions.SpecializedFunction.ExpressionEvaluator]].
+   * [[org.apache.flink.table.functions.SpecializedFunction.ExpressionEvaluator]] or a function
+   * added by [[addReusableFunction]] without explicit context arguments.
    *
    * The default derives it from the operator's runtime context. Generated classes that are not
    * operators (see [[BridgingFunctionGenUtil]]'s expression evaluators, [[ExpressionReducer]]'s
    * constant context and the watermark generator pushed into a source) have no runtime context and
-   * override this accordingly, just as they override [[addReusableFunction]].
+   * override this accordingly.
    */
   def functionContextCode(): String =
     s"new ${classOf[FunctionContext].getCanonicalName}(getRuntimeContext())"
@@ -899,6 +900,10 @@ class CodeGeneratorContext(
     val openFunction = if (contextArgs != null) {
       s"""
          |$fieldTerm.open(new ${functionContextClass.getCanonicalName}(${contextArgs.mkString(", ")}));
+       """.stripMargin
+    } else if (functionContextClass == classOf[FunctionContext]) {
+      s"""
+         |$fieldTerm.open(${functionContextCode()});
        """.stripMargin
     } else {
       s"""

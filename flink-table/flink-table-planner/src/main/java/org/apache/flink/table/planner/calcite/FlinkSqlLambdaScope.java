@@ -23,19 +23,28 @@ import org.apache.flink.table.planner.functions.utils.SqlValidatorUtils;
 
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.runtime.Resources;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlLambda;
 import org.apache.calcite.sql.SqlNode;
-import org.apache.calcite.sql.validate.DelegatingScope;
+import org.apache.calcite.sql.SqlSelect;
+import org.apache.calcite.sql.SqlUtil;
+import org.apache.calcite.sql.validate.ExtraCalciteResource;
+import org.apache.calcite.sql.validate.OrderByScope;
+import org.apache.calcite.sql.validate.SelectScope;
 import org.apache.calcite.sql.validate.SqlLambdaScope;
 import org.apache.calcite.sql.validate.SqlNameMatcher;
 import org.apache.calcite.sql.validate.SqlQualified;
 import org.apache.calcite.sql.validate.SqlValidatorScope;
+import org.apache.calcite.sql.validate.SqlValidatorUtil;
+import org.apache.calcite.util.Litmus;
+import org.apache.calcite.util.Util;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.util.List;
 import java.util.Map;
 
+import static java.util.Objects.requireNonNull;
 import static org.apache.calcite.util.Static.RESOURCE;
 
 /**
@@ -71,19 +80,40 @@ import static org.apache.calcite.util.Static.RESOURCE;
  * considers a column {@code r}. Calcite's main branch qualifies compound identifiers the same way,
  * but has no equivalent of the {@link #resolve} override.
  *
+ * <p><b>ORDER BY.</b> A body resolves names in the same way in every clause: its parameters, then
+ * the columns of the enclosing query's FROM clause. An ORDER BY expression may also use the aliases
+ * of the select list, which the ORDER BY scope resolves first. A lambda written in ORDER BY
+ * therefore gets the scope that its ORDER BY scope delegates to as its parent, and the validator's
+ * ORDER BY expansion leaves the lambda alone (see {@code
+ * SqlValidatorImpl.OrderExpressionExpander}). A name of such a body that the ORDER BY clause would
+ * resolve to a select-list alias is accepted only if the alias stands for the column of that name.
+ * Otherwise the two readings differ, and the name is rejected rather than read as either, see
+ * {@link #checkNotOtherSelectAlias}.
+ *
  * <p>Subclassing keeps this out of Flink's vendored copies of Calcite: {@link SqlLambdaScope} is
  * public and non-final and its three resolution methods are public, so only the {@code case LAMBDA}
- * branch of the (private) {@code SqlValidatorImpl#registerFrom}, which instantiates the scope, has
- * to be patched in the vendored validator.
+ * branch of the (private) {@code SqlValidatorImpl#registerFrom}, which instantiates the scope, and
+ * the ORDER BY expansion have to be patched in the vendored validator.
  */
 @Internal
 public class FlinkSqlLambdaScope extends SqlLambdaScope {
 
+    private static final ExtraCalciteResource EXTRA_RESOURCE =
+            Resources.create(ExtraCalciteResource.class);
+
     private final SqlLambda lambdaExpr;
 
+    /** Whether the lambda is written directly in ORDER BY, see the class comment. */
+    private final boolean inOrderBy;
+
     public FlinkSqlLambdaScope(SqlValidatorScope parent, SqlLambda lambdaExpr) {
-        super(parent, lambdaExpr);
+        super(skipOrderByScope(parent), lambdaExpr);
         this.lambdaExpr = lambdaExpr;
+        this.inOrderBy = parent instanceof OrderByScope;
+    }
+
+    private static SqlValidatorScope skipOrderByScope(SqlValidatorScope parent) {
+        return parent instanceof OrderByScope ? ((OrderByScope) parent).getParent() : parent;
     }
 
     /**
@@ -96,15 +126,21 @@ public class FlinkSqlLambdaScope extends SqlLambdaScope {
      * are no more columns of the enclosing query than its own are, so those are matched too.
      * Otherwise {@code ARRAY_TRANSFORM(a, e -> ARRAY_TRANSFORM(a, x -> x + e)) ... GROUP BY a}
      * would report that {@code e} is not being grouped.
+     *
+     * <p>The search stops at the first scope that is not a lambda's, i.e. at the query the lambda
+     * belongs to. In a sub-query of a lambda body a name is resolved against the sub-query's own
+     * table aliases first, so the {@code x.base} in {@code x -> (SELECT ... ARRAY_TRANSFORM(..., y
+     * -> y + x.base) ... FROM t AS x GROUP BY x.g)} is a column of the alias {@code x} and must be
+     * reported as not being grouped. A sub-query that does refer to a parameter of an enclosing
+     * lambda is rejected before, see {@code FlinkCalciteSqlValidator#validateLambdaBody}.
      */
     @Override
     public boolean isParameter(SqlIdentifier id) {
         final String name = id.names.get(0);
         for (SqlValidatorScope current = this;
-                current instanceof DelegatingScope;
-                current = ((DelegatingScope) current).getParent()) {
-            if (current instanceof SqlLambdaScope
-                    && ((SqlLambdaScope) current).getParameterTypes().containsKey(name)) {
+                current instanceof SqlLambdaScope;
+                current = ((SqlLambdaScope) current).getParent()) {
+            if (((SqlLambdaScope) current).getParameterTypes().containsKey(name)) {
                 return true;
             }
         }
@@ -124,7 +160,44 @@ public class FlinkSqlLambdaScope extends SqlLambdaScope {
             validateFieldPath(identifier);
             return SqlQualified.create(this, 1, null, identifier);
         }
+        if (inOrderBy) {
+            checkNotOtherSelectAlias(identifier);
+        }
         return parent.fullyQualify(identifier);
+    }
+
+    /**
+     * Rejects a name of a body written in ORDER BY that the ORDER BY clause would resolve to a
+     * select-list alias of anything but the column of that name. In {@code SELECT base * 2 AS base
+     * FROM t ORDER BY ARRAY_TRANSFORM(a, x -> x * base)[1]}, {@code base} is the column in a lambda
+     * body but the alias elsewhere in ORDER BY; with {@code SELECT base AS y}, {@code y} is no
+     * column at all. Substituting the aliased expression into the body is not safe: a lambda
+     * parameter could capture a name of that expression. An alias that stands for the column
+     * itself, as the {@code base} of {@code SELECT base FROM t}, means the same in both readings,
+     * also if the select list repeats it.
+     */
+    private void checkNotOtherSelectAlias(SqlIdentifier identifier) {
+        if (!identifier.isSimple() || !validator.config().conformance().isSortByAlias()) {
+            return;
+        }
+        final String name = identifier.getSimple();
+        final SqlNameMatcher nameMatcher = validator.getCatalogReader().nameMatcher();
+        final SelectScope selectScope =
+                requireNonNull(validator.getRawSelectScope((SqlSelect) parent.getNode()));
+        for (SqlNode item : requireNonNull(selectScope.getExpandedSelectList())) {
+            final String alias = SqlValidatorUtil.alias(item);
+            if (alias == null || !nameMatcher.matches(alias, name)) {
+                continue;
+            }
+            final SqlNode expr = SqlUtil.stripAs(item);
+            if (!(expr instanceof SqlIdentifier
+                    && nameMatcher.matches(Util.last(((SqlIdentifier) expr).names), name)
+                    && expr.equalsDeep(
+                            parent.fullyQualify(identifier).identifier, Litmus.IGNORE))) {
+                throw validator.newValidationError(
+                        identifier, EXTRA_RESOURCE.selectAliasInOrderByLambdaBody(name));
+            }
+        }
     }
 
     /**

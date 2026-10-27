@@ -408,19 +408,19 @@ class DataTypesTest {
     }
 
     @Test
-    void testFunctionTypeBridgesToEquivalentJdkInterface() {
-        // a function author reaching for the JDK or Flink interface rather than the family member
-        // must be able to name it in bridgedTo(...), not merely rely on Function1..Function3
-        // extending it
-        assertThat(DataTypes.FUNCTION(1).bridgedTo(Function.class))
-                .hasConversionClass(Function.class);
-        assertThat(DataTypes.FUNCTION(2).bridgedTo(BiFunction.class))
-                .hasConversionClass(BiFunction.class);
-        assertThat(DataTypes.FUNCTION(3).bridgedTo(TriFunction.class))
-                .hasConversionClass(TriFunction.class);
-        // Supplier is not an alias: the generated object's method is apply(), not get(), so it is
-        // usable as a declared parameter through Function0 but cannot be bridged to
+    void testFunctionTypeDoesNotBridgeToJdkInterface() {
+        // only the FunctionN is a conversion class, not an interface of the same arity that it
+        // may extend
         assertThatThrownBy(() -> DataTypes.FUNCTION(0).bridgedTo(Supplier.class))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("does not support a conversion");
+        assertThatThrownBy(() -> DataTypes.FUNCTION(1).bridgedTo(Function.class))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("does not support a conversion");
+        assertThatThrownBy(() -> DataTypes.FUNCTION(2).bridgedTo(BiFunction.class))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("does not support a conversion");
+        assertThatThrownBy(() -> DataTypes.FUNCTION(3).bridgedTo(TriFunction.class))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining("does not support a conversion");
     }

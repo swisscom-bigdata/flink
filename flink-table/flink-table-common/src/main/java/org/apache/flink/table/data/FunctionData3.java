@@ -22,10 +22,7 @@ import org.apache.flink.annotation.PublicEvolving;
 
 /**
  * A three-parameter lambda argument that accepts and returns {@link RowData internal data
- * structures}.
- *
- * <p>This is the internal-data counterpart of {@link org.apache.flink.util.function.Function3}. See
- * {@link FunctionData1} for how a function declares which of the two it receives.
+ * structures}. Functions that keep a result beyond another call must deep-copy it first.
  */
 @PublicEvolving
 @FunctionalInterface

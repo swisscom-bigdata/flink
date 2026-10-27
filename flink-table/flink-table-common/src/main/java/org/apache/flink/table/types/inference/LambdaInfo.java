@@ -30,14 +30,15 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Describes a lambda argument of a higher-order function call, as returned by {@link
  * CallContext#getLambdaArgument(int)}.
  *
  * <p>It exposes the lambda body as an {@link Expression} together with the typed fields for the
- * lambda parameters and the result type. A user-defined higher-order function can evaluate the body
- * per element by passing these to {@link
+ * lambda parameters and the result type. A higher-order function can evaluate the body per element
+ * by passing these to {@link
  * org.apache.flink.table.functions.SpecializedFunction.ExpressionEvaluatorFactory#createEvaluator(Expression,
  * DataType, DataTypes.Field...)}.
  *
@@ -66,39 +67,22 @@ public final class LambdaInfo {
     }
 
     /**
-     * Returns the lambda body as an {@link Expression}.
+     * Returns the lambda body as an {@link Expression}, or an empty optional if the body is not
+     * available.
      *
      * <p>The body is only available while a function is being specialized (i.e. from {@link
      * org.apache.flink.table.functions.SpecializedFunction#specialize}), not during type inference.
      * This holds for both the SQL and the Table API surface: type inference must derive from {@link
      * #getParameterFields()} and {@link #getReturnDataType()} alone, so that a function infers the
-     * same types no matter which surface the call was written on. Use {@link #hasBody()} to check
-     * for availability instead of relying on the phase.
-     *
-     * @throws IllegalStateException if the body is not available in the current phase
+     * same types no matter which surface the call was written on.
      */
-    public Expression getBody() {
-        if (body == null) {
-            throw new IllegalStateException(
-                    "The lambda body is only available during function specialization, "
-                            + "not during type inference.");
-        }
-        return body;
-    }
-
-    /** Returns whether the lambda body is available, i.e. whether {@link #getBody()} succeeds. */
-    public boolean hasBody() {
-        return body != null;
+    public Optional<Expression> getBody() {
+        return Optional.ofNullable(body);
     }
 
     /** Returns the typed fields describing the lambda parameters (name and type). */
     public List<Field> getParameterFields() {
         return parameterFields;
-    }
-
-    /** Returns the fields as an array, for convenient use with {@code createEvaluator}. */
-    public Field[] getParameterFieldsArray() {
-        return parameterFields.toArray(new Field[0]);
     }
 
     /** Returns the result type of the lambda body. */

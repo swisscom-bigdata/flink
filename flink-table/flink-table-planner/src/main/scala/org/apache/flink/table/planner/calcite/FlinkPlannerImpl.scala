@@ -36,7 +36,6 @@ import org.apache.calcite.plan._
 import org.apache.calcite.prepare.CalciteCatalogReader
 import org.apache.calcite.rel.`type`.RelDataType
 import org.apache.calcite.rel.{RelFieldCollation, RelNode, RelRoot}
-import org.apache.calcite.rel.RelHomogeneousShuttle
 import org.apache.calcite.rel.hint.RelHint
 import org.apache.calcite.rex.{RexInputRef, RexNode}
 import org.apache.calcite.sql.{SqlBasicCall, SqlCall, SqlHint, SqlKind, SqlNode, SqlNodeList, SqlOperatorTable, SqlSelect, SqlTableRef}
@@ -249,7 +248,7 @@ class FlinkPlannerImpl(
       // we might enable it again once Calcite has better support for structured types
       // root = root.withRel(sqlToRelConverter.flattenTypes(root.rel, true))
 
-      // Lift outer-column captures out of built-in higher-order function lambdas (see
+      // Lift outer-column captures out of higher-order function lambdas (see
       // HigherOrderFunctionUtil). This must run before column trimming so that the captured columns
       // are kept. The Table API performs the same lifting during its own expression conversion.
       root.withRel(liftHigherOrderFunctionCaptures(root.rel))
@@ -264,21 +263,14 @@ class FlinkPlannerImpl(
   }
 
   /**
-   * Rewrites every higher-order function call in the tree (built-in and user-defined) so that
-   * outer-column captures of its lambda are lifted into additional lambda parameters and trailing
-   * call operands (see [[HigherOrderFunctionUtil]]). Calls without a capturing lambda are left
+   * Rewrites every higher-order function call in the tree, including the calls in sub-queries, so
+   * that the captures of its lambda are lifted into additional lambda parameters and trailing call
+   * operands (see [[HigherOrderFunctionUtil]]). Calls without a capturing lambda are left
    * unchanged. Join conditions are already lifted during conversion, before they are pushed down
    * (see [[FlinkSqlToRelConverter]]).
    */
   private def liftHigherOrderFunctionCaptures(rel: RelNode): RelNode = {
-    val rexShuttle = HigherOrderFunctionUtil.captureLiftingShuttle(rel.getCluster.getRexBuilder)
-    val relShuttle = new RelHomogeneousShuttle {
-      override def visit(node: RelNode): RelNode = {
-        val visited = super.visit(node)
-        visited.accept(rexShuttle)
-      }
-    }
-    rel.accept(relShuttle)
+    HigherOrderFunctionUtil.liftCaptures(rel, rel.getCluster.getRexBuilder)
   }
 
   private class CheckContainQueryHintsShuttle extends SqlShuttle {

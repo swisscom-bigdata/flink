@@ -25,113 +25,96 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * An {@link InputTypeStrategy} that declares one or more lambda arguments.
+ * An {@link InputTypeStrategy} for a function signature that takes one or more lambda arguments.
  *
- * <p>The expression resolver and the planner use this to bind the types of a lambda's parameters
- * from the sibling arguments before resolving the lambda body. Implementing this interface is what
- * declares that the signature contains a lambda: a strategy without a lambda argument must not
- * implement it, because the interface alone rejects a lambda argument for a function kind that
- * cannot host one. The same method is consulted on both surfaces, so a function that implements
- * this interface behaves identically in SQL and in the Table API.
+ * <p>Implementing this interface is the only way to declare a lambda argument. A call that passes a
+ * lambda to a function whose input type strategy does not implement it is rejected. {@link
+ * #inferInputTypes} handles a lambda argument like any other argument, and {@link
+ * #getExpectedLambdaParameterTypes} returns the types of the lambda's parameters, which are needed
+ * before the lambda body can be resolved. SQL and the Table API call the same method, so both bind
+ * the same types.
  *
- * <p>This is the only way to declare a lambda argument. A function that wants one implements this
- * interface as its {@link
- * org.apache.flink.table.types.inference.TypeInference#getInputTypeStrategy() input type strategy}:
- * {@link #inferInputTypes} accepts the lambda argument like any other argument, and {@link
- * #getExpectedLambdaParameterTypes} states what its parameters are bound to. The built-in
- * higher-order functions declare their signatures the same way.
+ * <p>Lambda arguments are currently only supported by built-in functions. A call that passes a
+ * lambda to a user-defined function is rejected during validation, in SQL and in the Table API.
  *
- * <p>Lambda arguments are currently only supported by built-in functions. A user-defined function
- * whose input type strategy implements this interface is rejected during validation, in SQL as well
- * as in the Table API.
+ * <p><b>The lambda object at runtime</b>
  *
- * <p><b>Contract of the function object received at runtime</b>
- *
- * <p>A lambda argument reaches the evaluation method as an {@code
- * org.apache.flink.util.function.FunctionN} matching its arity, from {@link
- * org.apache.flink.util.function.Function0} to {@link org.apache.flink.util.function.Function4} —
- * or, if the type inference declares the argument's conversion class accordingly, as the
- * corresponding {@link org.apache.flink.table.data.FunctionData0}, {@link
- * org.apache.flink.table.data.FunctionData1}, {@link org.apache.flink.table.data.FunctionData2},
- * {@link org.apache.flink.table.data.FunctionData3}, or {@link
- * org.apache.flink.table.data.FunctionData4}. That object is not an ordinary value but a handle on
- * a framework-compiled expression. The following rules are binding for the function:
+ * <p>A lambda with {@code n} parameters reaches the evaluation method as an {@code
+ * org.apache.flink.util.function.FunctionN}, or as an {@code
+ * org.apache.flink.table.data.FunctionDataN} if the type inference declares that conversion class.
+ * The object is not a value: applying it runs a lambda body compiled by Flink. The function that
+ * receives it must follow these rules:
  *
  * <ul>
- *   <li><b>Lifetime</b>: the object is valid only for the duration of the evaluation method call it
- *       is passed to. It must not be stored in a field, put into state, returned, handed to
- *       anything that outlives the call, or serialized. Behavior after the evaluation method has
- *       returned is undefined and is not checked for.
- *   <li><b>Identity</b>: a fresh object is created for every evaluation of the enclosing call (per
- *       row, or per element if the call itself is located in a lambda body). Its identity must not
- *       be used as a cache key.
- *   <li><b>Captures</b>: all captured values are evaluated before the evaluation method is entered
- *       and bound behind the object, so every application within one call observes the same
- *       snapshot.
- *   <li><b>Invocation</b>: the function owns its loop and may apply the object zero, one, or
- *       arbitrarily many times, in any order. The framework never applies the lambda on the
- *       function's behalf, thus the body is only evaluated where the function applies it.
- *   <li><b>Arguments and result</b>: {@code apply} may be called with {@code null} arguments and
- *       may return {@code null} (i.e. SQL {@code NULL}). A lambda exposed through a {@code
- *       FunctionN} exchanges external values. A lambda exposed through the corresponding
- *       internal-data interface may return a mutable value backed by evaluator-owned memory that
- *       the next application reuses. A function that retains or buffers such an internal result
- *       across another application must deep-copy it first.
- *   <li><b>Nesting</b>: applications of different lambda objects may nest to any depth, as a body
- *       may contain another higher-order call whose function receives its own object. An object is
- *       never re-entered from within its own body — SQL has no recursion — and a function must not
- *       construct such a call itself.
- *   <li><b>Thread affinity</b>: the object must be applied only from the thread that called the
- *       evaluation method, and only while that call is on the stack. It is not thread-safe:
- *       applications must not overlap, and the object must not be handed to another thread, an
- *       executor, a parallel stream, or a {@link java.util.concurrent.CompletableFuture} callback.
- *       This is not enforced and cannot be probed: the compiled body is a single instance shared by
- *       every object built at that call site, so a body that folds to plain arithmetic may appear
- *       to tolerate concurrent applications while one that constructs a {@code ROW}/{@code ARRAY}
- *       or calls another function corrupts the reusable buffers behind it. For the same reason a
- *       retained object stays technically callable after the evaluation method returned; applying
- *       it then is undefined behavior, not a supported mode. Consequently, {@link
- *       org.apache.flink.table.functions.AsyncScalarFunction} and {@link
- *       org.apache.flink.table.functions.AsyncTableFunction} cannot declare a lambda argument; only
- *       {@link org.apache.flink.table.functions.ScalarFunction} and {@link
- *       org.apache.flink.table.functions.TableFunction} can.
- *   <li><b>Exceptions</b>: an unchecked exception ({@link RuntimeException} or {@link Error})
- *       raised while the body is evaluated propagates out of {@code apply} unchanged, exactly as it
- *       does for a built-in higher-order function, which evaluates its body the same way. Only a
- *       throwable that {@code apply} cannot declare leaves it as an {@link
- *       org.apache.flink.util.FlinkRuntimeException} with the original error as its cause. Letting
- *       it propagate is recommended; it then fails the task like any other function failure.
- *       Catching it is allowed, but the application then yields no result, anything the body
- *       touched is left in an unspecified state, and the enclosing call is not retried.
- *   <li><b>Lifecycle</b>: no lambda object exists in {@link
+ *   <li><b>Lifetime</b>: the object is valid only during the evaluation call that receives it. Do
+ *       not store it in a field or in state, return it, pass it to anything that outlives the call,
+ *       or serialize it. Using it after the call has returned is undefined behavior and is not
+ *       detected.
+ *   <li><b>Identity</b>: every evaluation of the call creates a new object (per row, or per element
+ *       if the call is inside another lambda body). Do not use its identity as a cache key.
+ *   <li><b>Captures</b>: values that the body reads from outside the lambda are evaluated once,
+ *       before the evaluation method is called. Every application within one call sees the same
+ *       values.
+ *   <li><b>Invocation</b>: the function decides how often and in which order it applies the object:
+ *       zero, one or many times. Flink never applies it on the function's behalf, so the body runs
+ *       only when the function applies it.
+ *   <li><b>Nulls</b>: pass {@code null} only for a parameter that {@link
+ *       LambdaInfo#getParameterFields()} declares nullable. The compiled body trusts the declared
+ *       types, so {@code null} for a {@code NOT NULL} parameter is undefined behavior. A function
+ *       that may pass {@code null}, for example to pad the shorter of two arrays, must declare that
+ *       parameter nullable. {@code apply} returns {@code null} only if {@link
+ *       LambdaInfo#getReturnDataType()} is nullable.
+ *   <li><b>Reused results</b>: a {@code FunctionN} accepts and returns external values. A {@code
+ *       FunctionDataN} may return an internal value whose memory is reused by the next application.
+ *       A function that keeps such a result beyond the next application must deep-copy it first.
+ *   <li><b>Nesting</b>: a lambda body may call another higher-order function, which receives its
+ *       own object, so applications may nest to any depth. An object is never applied again from
+ *       within its own body, because SQL has no recursion, and a function must not make this
+ *       happen.
+ *   <li><b>Threads</b>: apply the object only from the thread that called the evaluation method,
+ *       and only while that call is running. The object is not thread-safe: applications must not
+ *       overlap, and the object must not be passed to another thread, an executor, a parallel
+ *       stream or a {@link java.util.concurrent.CompletableFuture} callback. This is not checked.
+ *       All objects from one call site share one compiled body, so a simple arithmetic body may
+ *       appear to work concurrently, while a body that builds a {@code ROW} or {@code ARRAY} or
+ *       calls another function corrupts the buffers it reuses.
+ *   <li><b>Exceptions</b>: a {@link RuntimeException} or {@link Error} thrown by the body
+ *       propagates out of {@code apply} unchanged. A checked exception is wrapped in an {@link
+ *       org.apache.flink.util.FlinkRuntimeException}. Letting it propagate is recommended, so that
+ *       it fails the task like any other function error. If the function catches it, that
+ *       application has no result, anything the body touched is in an unspecified state, and the
+ *       call is not retried.
+ *   <li><b>Lifecycle</b>: no lambda object exists during {@link
  *       org.apache.flink.table.functions.UserDefinedFunction#open(org.apache.flink.table.functions.FunctionContext)}
- *       or {@link org.apache.flink.table.functions.UserDefinedFunction#close()}, and none must be
- *       obtained or applied there. The framework owns the lifecycle of the compiled body; a
- *       function called from a body is instantiated, opened, and closed like one called anywhere
- *       else.
- *   <li><b>Determinism</b>: the object is only as deterministic as the body of the caller's lambda
- *       expression, so applying the same arguments twice may yield different results.
+ *       or {@link org.apache.flink.table.functions.UserDefinedFunction#close()}, so none may be
+ *       used there. Flink manages the compiled body. A function called inside a body is created,
+ *       opened and closed as anywhere else.
+ *   <li><b>Determinism</b>: the object is only as deterministic as the lambda body, so applying it
+ *       twice to the same arguments may give different results. A non-deterministic body makes the
+ *       whole call non-deterministic, and the planner treats it like any other non-deterministic
+ *       call: for example, two identical calls are evaluated separately instead of sharing one
+ *       result.
  * </ul>
  */
 @PublicEvolving
 public interface LambdaInputTypeStrategy extends InputTypeStrategy {
 
     /**
-     * Returns the expected parameter types of the lambda argument at the given position, or an
-     * empty optional if the argument at that position is not a lambda (or the types cannot be
-     * derived).
+     * Returns the parameter types of the lambda argument at the given position, or an empty
+     * optional if that argument is not a lambda or its parameter types cannot be derived.
      *
-     * <p>The types are derived from the (already resolved) sibling arguments available in the given
-     * {@link CallContext}.
+     * <p>Derive the types only from the arguments before the lambda, at positions {@code 0} to
+     * {@code argumentPos - 1} of the signature (named arguments are already mapped to their
+     * positions). Only those arguments are guaranteed to be resolved: the Table API resolves
+     * arguments from left to right, so the lambda and the arguments after it are not resolved yet
+     * and must not be read. If the parameter types depend on another argument, place the lambda
+     * after that argument in the signature.
      *
-     * <p>A present list must contain between zero and {@link
+     * <p>A present list contains between zero and {@link
      * org.apache.flink.table.types.logical.FunctionType#MAX_CONVERTIBLE_PARAMETER_COUNT} types,
-     * because a lambda is passed to a user-defined function as an {@code
-     * org.apache.flink.util.function.FunctionN} matching its arity, from {@link
-     * org.apache.flink.util.function.Function0} to {@link
-     * org.apache.flink.util.function.Function4}, and no other number of parameters can be
-     * represented at runtime. Both SQL and the Table API reject a list of any other size with a
-     * {@link org.apache.flink.table.api.ValidationException}.
+     * because {@code FunctionN} and {@code FunctionDataN} exist only for up to four parameters. SQL
+     * and the Table API reject a list of any other size with a {@link
+     * org.apache.flink.table.api.ValidationException}.
      */
     Optional<List<DataType>> getExpectedLambdaParameterTypes(
             CallContext callContext, int argumentPos);

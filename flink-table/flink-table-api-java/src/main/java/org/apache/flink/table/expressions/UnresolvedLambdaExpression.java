@@ -35,9 +35,9 @@ import java.util.stream.Collectors;
  * function such as {@code ARRAY_TRANSFORM(array, x -> x + 1)}.
  *
  * <p>A lambda is not a value that flows at runtime; it is only valid as an argument of a
- * higher-order function. During resolution the parameter types are bound from the sibling arguments
- * of the enclosing higher-order call and the body is resolved in a scope containing the parameters,
- * which turns this into a resolved {@link LambdaExpression}.
+ * higher-order function. During resolution the parameter types are bound from the arguments that
+ * precede the lambda in the enclosing higher-order call and the body is resolved in a scope
+ * containing the parameters, which turns this into a resolved {@link LambdaExpression}.
  *
  * <p>The parameter names must be unique, because the body binds them by name.
  */

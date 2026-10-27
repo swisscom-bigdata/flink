@@ -89,6 +89,7 @@ public class StaticArgument {
         checkOptionalType();
         checkTableType();
         checkModelType();
+        checkLambdaType();
     }
 
     /**
@@ -412,6 +413,34 @@ public class StaticArgument {
             return;
         }
         checkModelNotOptional();
+    }
+
+    private void checkLambdaType() {
+        if (dataType == null) {
+            return;
+        }
+        final LogicalType type = dataType.getLogicalType();
+        // Built-in functions declare a lambda argument in their input type strategy, which also
+        // derives the lambda's parameter types. A static argument would only let a NULL or a
+        // non-lambda value reach eval() in place of the function object.
+        if (type.is(LogicalTypeRoot.FUNCTION)) {
+            throw new ValidationException(
+                    String.format(
+                            "Invalid data type '%s' for argument '%s'. Lambda arguments are "
+                                    + "currently only supported by built-in functions, which "
+                                    + "declare them in their input type strategy rather than in "
+                                    + "a static signature.",
+                            type, name));
+        }
+        if (LogicalTypeChecks.hasFunctionType(type)) {
+            throw new ValidationException(
+                    String.format(
+                            "Invalid data type '%s' for argument '%s'. The FUNCTION data type is "
+                                    + "a helper type for lambda arguments of higher-order "
+                                    + "functions. It cannot be materialized and must not be "
+                                    + "nested in another data type.",
+                            type, name));
+        }
     }
 
     private void checkTableNotOptional() {

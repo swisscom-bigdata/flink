@@ -35,10 +35,10 @@ import java.util.stream.Collectors;
  * function such as {@code ARRAY_TRANSFORM(array, x -> x + 1)}.
  *
  * <p>The parameters are represented as {@link LocalReferenceExpression}s whose types were bound
- * from the sibling arguments of the enclosing higher-order call. The output data type is a {@code
- * FUNCTION} type carrying the number of parameters; the parameter and body types are reached
- * through {@link #getParameters()} and {@link #getBody()} (and exposed to type inference as a
- * {@link org.apache.flink.table.types.inference.LambdaInfo}).
+ * from the arguments that precede the lambda in the enclosing higher-order call. The output data
+ * type is a {@code FUNCTION} type carrying the number of parameters; the parameter and body types
+ * are reached through {@link #getParameters()} and {@link #getBody()} (and exposed to type
+ * inference as a {@link org.apache.flink.table.types.inference.LambdaInfo}).
  *
  * <p>The number of parameters must be between zero and {@code
  * FunctionType#MAX_CONVERTIBLE_PARAMETER_COUNT}, because that is what a lambda can be represented
@@ -55,7 +55,8 @@ public final class LambdaExpression implements ResolvedExpression {
 
     /**
      * Creates a resolved lambda expression. Instances are created by the expression resolver, which
-     * binds the parameter types from the sibling arguments of the enclosing higher-order call.
+     * binds the parameter types from the arguments that precede the lambda in the enclosing
+     * higher-order call.
      */
     @Internal
     public LambdaExpression(List<LocalReferenceExpression> parameters, ResolvedExpression body) {

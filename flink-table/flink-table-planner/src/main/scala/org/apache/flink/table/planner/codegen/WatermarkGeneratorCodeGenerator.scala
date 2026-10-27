@@ -163,8 +163,9 @@ class WatermarkGeneratorFunctionContext(
     super.addReusableConverter(dataType, "this.getClass().getClassLoader()")
   }
 
-  // A watermark generator pushed into a source is not an operator and thus has no runtime context.
+  // A watermark generator pushed into a source is not an operator and thus has no runtime context,
+  // but the source's watermark context still provides the metric group.
   override def functionContextCode(): String =
-    s"new ${classOf[FunctionContext].getCanonicalName}(" +
-      "null, this.getClass().getClassLoader(), openContext)"
+    s"new ${classOf[WatermarkGeneratorCodeGeneratorFunctionContextWrapper].getCanonicalName}(" +
+      s"$contextTerm, this.getClass().getClassLoader(), openContext)"
 }

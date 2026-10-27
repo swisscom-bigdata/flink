@@ -193,10 +193,45 @@ public class CalcTestPrograms {
                                             Row.of((Object) new Integer[] {11, 12, 13}))
                                     .consumedAfterRestore(Row.of((Object) new Integer[] {104, 105}))
                                     .build())
-                    // the capture is lifted into a trailing lambda parameter (cap$0) and an
+                    // the capture is lifted into a trailing lambda parameter (cap$1) and an
                     // additional call operand, which must survive plan (de)serialization
                     .runSql(
                             "INSERT INTO sink_t SELECT ARRAY_TRANSFORM(a, x -> x + base) FROM source_t")
+                    .build();
+
+    public static final TableTestProgram CALC_ARRAY_TRANSFORM_NESTED =
+            TableTestProgram.of(
+                            "calc-array-transform-nested",
+                            "validates calc node with nested lambdas whose captures are threaded through both levels")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema("a ARRAY<INT>", "b ARRAY<INT>", "base INT")
+                                    .producedBeforeRestore(
+                                            Row.of(
+                                                    new Integer[] {1, 2},
+                                                    new Integer[] {10, 20},
+                                                    100))
+                                    .producedAfterRestore(
+                                            Row.of(new Integer[] {3}, new Integer[] {1, 2}, 0))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a ARRAY<ARRAY<INT>>")
+                                    .consumedBeforeRestore(
+                                            Row.of(
+                                                    (Object)
+                                                            new Integer[][] {
+                                                                {111, 121}, {112, 122}
+                                                            }))
+                                    .consumedAfterRestore(Row.of((Object) new Integer[][] {{4, 5}}))
+                                    .build())
+                    // The inner lambda captures the outer parameter x (cap$x) and the column base,
+                    // which the outer lambda captures too (cap$2) and passes in. Both lambdas use
+                    // the indices 0 and 1,000,000, and each index refers to its nearest enclosing
+                    // lambda.
+                    .runSql(
+                            "INSERT INTO sink_t SELECT ARRAY_TRANSFORM(a,"
+                                    + " x -> ARRAY_TRANSFORM(b, y -> x + y + base)) FROM source_t")
                     .build();
 
     public static final TableTestProgram CALC_ARRAY_ZIP_WITH =

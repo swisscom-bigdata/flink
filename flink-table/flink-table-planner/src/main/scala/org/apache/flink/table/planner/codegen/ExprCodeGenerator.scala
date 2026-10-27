@@ -36,7 +36,7 @@ import org.apache.flink.table.planner.codegen.calls.SearchOperatorGen.generateSe
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable._
 import org.apache.flink.table.planner.functions.sql.SqlThrowExceptionFunction
-import org.apache.flink.table.planner.functions.utils.{HigherOrderFunctionUtil, ScalarSqlFunction, TableSqlFunction}
+import org.apache.flink.table.planner.functions.utils.{ScalarSqlFunction, TableSqlFunction}
 import org.apache.flink.table.planner.plan.utils.{FlinkRexUtil, RexLiteralUtil}
 import org.apache.flink.table.planner.utils.ShortcutUtils
 import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter.fromLogicalTypeToDataType
@@ -66,7 +66,10 @@ class ExprCodeGenerator(
   def this(ctx: CodeGeneratorContext, nullableInput: Boolean) =
     this(ctx, nullableInput, null)
 
-  /** term of the [[ProcessFunction]]'s context, can be changed when needed */
+  /**
+   * term of the [[ProcessFunction]]'s context, can be changed when needed. It is null if the
+   * generated code has no operator context, such as an expression evaluator.
+   */
   var contextTerm = "ctx"
 
   /** information of the first input */
@@ -78,6 +81,15 @@ class ExprCodeGenerator(
   var input2Type: Option[LogicalType] = None
   var input2Term: Option[String] = None
   var input2FieldMapping: Option[Array[Int]] = None
+
+  private def requireContextTerm(value: String): String = {
+    if (contextTerm == null) {
+      throw new CodeGenException(
+        s"$value cannot be evaluated here, for example in the body of a lambda, because it " +
+          "needs the context of the operator.")
+    }
+    contextTerm
+  }
 
   /** information of the user-defined constructor */
   var functionContextTerm: Option[String] = None
@@ -939,7 +951,7 @@ class ExprCodeGenerator(
 
   /**
    * Whether the given operand is (or, inside a [[RexProgram]], references) a [[RexLambda]]. Such
-   * operands are compile-time only for user-defined higher-order functions.
+   * operands are compile-time only: code generation turns them into function objects.
    */
   private def isLambdaOperand(node: RexNode): Boolean = node match {
     case _: RexLambda => true
@@ -1223,10 +1235,10 @@ class ExprCodeGenerator(
         generateNullLiteral(new LocalZonedTimestampType(true, TimestampKind.PROCTIME, 3))
 
       case PROCTIME_MATERIALIZE =>
-        generateProctimeTimestamp(ctx, contextTerm)
+        generateProctimeTimestamp(ctx, requireContextTerm("PROCTIME"))
 
       case STREAMRECORD_TIMESTAMP =>
-        generateRowtimeAccess(ctx, contextTerm, false)
+        generateRowtimeAccess(ctx, requireContextTerm("The timestamp of a record"), false)
 
       case JSON_VALUE => new JsonValueCallGen().generate(ctx, operands, resultType)
 
@@ -1264,7 +1276,7 @@ class ExprCodeGenerator(
         bsf.getDefinition match {
 
           case BuiltInFunctionDefinitions.CURRENT_WATERMARK =>
-            generateWatermark(ctx, contextTerm, resultType)
+            generateWatermark(ctx, requireContextTerm("CURRENT_WATERMARK"), resultType)
 
           case BuiltInFunctionDefinitions.GREATEST =>
             operands.foreach(operand => requireComparable(operand))

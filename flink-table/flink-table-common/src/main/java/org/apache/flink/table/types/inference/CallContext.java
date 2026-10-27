@@ -122,17 +122,16 @@ public interface CallContext {
      * Returns information about the lambda argument at the given position, if the argument is a
      * lambda expression (i.e. an argument declared via a {@link LambdaInputTypeStrategy}).
      *
-     * <p>This gives a user-defined higher-order function access to the lambda body, its parameter
-     * fields, and its result type so that it can evaluate the body per element using {@link
+     * <p>This gives a higher-order function access to the lambda body, its parameter fields, and
+     * its result type so that it can evaluate the body per element using {@link
      * org.apache.flink.table.functions.SpecializedFunction.ExpressionEvaluatorFactory}.
      *
      * <p>The body is only available while a function is being specialized (i.e. from {@link
      * org.apache.flink.table.functions.SpecializedFunction#specialize}), not during type inference;
-     * {@link LambdaInfo#getBody()} throws an {@link IllegalStateException} otherwise. Use {@link
-     * LambdaInfo#hasBody()} as the guard. Type inference must derive from {@link
-     * LambdaInfo#getParameterFields()} and {@link LambdaInfo#getReturnDataType()} alone, which are
-     * available in both phases, so that a function infers the same types whether the call was
-     * written in SQL or through the Table API.
+     * {@link LambdaInfo#getBody()} returns an empty optional otherwise. Type inference must derive
+     * from {@link LambdaInfo#getParameterFields()} and {@link LambdaInfo#getReturnDataType()}
+     * alone, which are available in both phases, so that a function infers the same types whether
+     * the call was written in SQL or through the Table API.
      *
      * <p>A function that only declares the lambda argument does not need to do this: the framework
      * compiles the body and hands the function a ready-to-use function object. See {@link

@@ -1521,6 +1521,10 @@ in the same way that `DESCRIPTOR` leaves the described columns to `CallContext#g
 The type itself carries only what determines the runtime representation, i.e. the number of
 parameters.
 
+Nullability does not apply to this type: a lambda is never a value, so it cannot be `NULL`. Flink
+always marks the type as nullable, and requesting `NOT NULL`, as in
+`DataTypes.FUNCTION(1).notNull()`, leaves it unchanged.
+
 The runtime does not support this type as a value. It is a pure helper type during translation and
 planning. Table columns cannot be declared with this type, it cannot be used as a state type, and
 functions cannot declare return types of this type. It is not exposed in the Python `DataTypes`; in
@@ -1549,19 +1553,17 @@ DataTypes.FUNCTION(1)
 
 **Bridging to JVM Types**
 
-| Java Type                                   | Input | Output | Remarks                                                     |
-|:--------------------------------------------|:-----:|:------:|:------------------------------------------------------------|
-| `org.apache.flink.util.function.Function0`  | X     |        | Zero parameters                                              |
-| `org.apache.flink.util.function.Function1`  | X     |        | One parameter; `java.util.function.Function` also accepted   |
-| `org.apache.flink.util.function.Function2`  | X     |        | Two parameters; `java.util.function.BiFunction` also accepted |
-| `org.apache.flink.util.function.Function3`  | X     |        | Three parameters; `org.apache.flink.util.function.TriFunction` also accepted |
-| `org.apache.flink.util.function.Function4`  | X     |        | Four parameters                                              |
+| Java Type                                   | Input | Output | Remarks          |
+|:--------------------------------------------|:-----:|:------:|:-----------------|
+| `org.apache.flink.util.function.Function0`  | X     |        | Zero parameters  |
+| `org.apache.flink.util.function.Function1`  | X     |        | One parameter    |
+| `org.apache.flink.util.function.Function2`  | X     |        | Two parameters   |
+| `org.apache.flink.util.function.Function3`  | X     |        | Three parameters |
+| `org.apache.flink.util.function.Function4`  | X     |        | Four parameters  |
 
-The `FunctionN` matching the number of lambda parameters is the default. `Function1`, `Function2`
-and `Function3` merely extend `Function`, `BiFunction` and `TriFunction`, so either spelling may be
-declared or bridged to at those arities. `java.util.function.Supplier` is the one exception: a
-`Supplier` parameter is satisfied by the generated object, because `Function0` extends it, but
-`Supplier` itself cannot be bridged to, because the object's method is `apply()`, not `get()`.
+The `FunctionN` matching the number of lambda parameters is the default. `Function0`, `Function1`
+and `Function2` extend `java.util.function.Supplier`, `Function` and `BiFunction`, so the received
+object can be passed to APIs that expect them. These interfaces cannot be bridged to.
 
 {{< /tab >}}
 {{< /tabs >}}

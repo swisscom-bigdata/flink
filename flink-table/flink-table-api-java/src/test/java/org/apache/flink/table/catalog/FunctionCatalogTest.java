@@ -185,7 +185,7 @@ class FunctionCatalogTest {
     void testBuiltInHigherOrderFunctionNameCollision(String builtInName) throws Exception {
         // Regression guard for FLINK-31207: the new higher-order built-ins become reserved
         // system-function names. This pins the resolution precedence the FLIP
-        // compatibility/migration guidance relies on, for each of the eight names.
+        // compatibility/migration guidance relies on, for each of the four names.
         final FunctionDefinition builtIn =
                 moduleManager.getFunctionDefinition(builtInName).orElseThrow(AssertionError::new);
 

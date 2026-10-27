@@ -502,7 +502,7 @@ class FlinkTypeFactoryTest {
                         .build());
         types.put(
                 LogicalTypeRoot.STRUCTURED_TYPE,
-                StructuredType.newBuilder(ObjectIdentifier.of("cat", "db", "auditedStructuredType"))
+                StructuredType.newBuilder(ObjectIdentifier.of("cat", "db", "structuredType"))
                         .build());
         types.put(LogicalTypeRoot.NULL, new NullType());
         types.put(

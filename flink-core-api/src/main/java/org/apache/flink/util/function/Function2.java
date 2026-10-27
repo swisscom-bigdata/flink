@@ -25,8 +25,7 @@ import java.util.function.BiFunction;
 /**
  * Function which takes two arguments.
  *
- * <p>This is the arity-2 member of the {@code FunctionN} family. It extends {@link BiFunction} so
- * that a function declared against that type keeps working unchanged.
+ * <p>It extends {@link BiFunction} so that it can be passed to APIs that expect one.
  *
  * @param <T1> type of the first argument
  * @param <T2> type of the second argument

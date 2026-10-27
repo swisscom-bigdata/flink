@@ -57,7 +57,7 @@ public interface RefinableLambdaInputTypeStrategy extends LambdaInputTypeStrateg
      * differs from the body type; the strategy is responsible for having rejected a body that
      * cannot be coerced in {@link #inferInputTypes}.
      *
-     * @param callContext the call context (with the resolved sibling arguments)
+     * @param callContext the call context (with the resolved arguments that precede the lambda)
      * @param argumentPos the position of the lambda argument
      */
     default Optional<DataType> getRequiredLambdaResultType(
@@ -66,24 +66,36 @@ public interface RefinableLambdaInputTypeStrategy extends LambdaInputTypeStrateg
     }
 
     /**
-     * Adjusts the lambda parameter types after the lambda body has been resolved once. This
-     * provides a single, monotonic feedback pass: the strategy may inspect the resolved body type
-     * and return refined parameter types, after which the resolver re-resolves the body with them.
+     * Adjusts the lambda parameter types after the lambda body has been resolved. The strategy may
+     * inspect the resolved body type and return refined parameter types, after which the resolver
+     * re-resolves the body with them and asks again, until the strategy keeps the types. The
+     * refinement must therefore be monotonic and reach a fixed point within {@link
+     * #MAX_PARAMETER_TYPE_ADJUSTMENTS} adjustments; both resolvers fail otherwise.
      *
-     * <p>{@code ARRAY_REDUCE} implements this to widen the accumulator parameter to nullable once
-     * the reducer body is found to be nullable, so a later iteration can observe an accumulator
-     * that an earlier iteration set to {@code NULL}.
+     * <p>{@code ARRAY_REDUCE} implements this for its accumulator parameter. It widens the
+     * accumulator to nullable once the reducer body is found to be nullable, so a later iteration
+     * can observe an accumulator that an earlier iteration set to {@code NULL}. And if the reducer
+     * body is not assignable to the accumulator, it widens the accumulator once, without loss and
+     * within the same type family, to a type the fold is stable in (for example {@code STRING} for
+     * a concatenation that starts from {@code ''}).
      *
-     * @param callContext the call context (with the resolved sibling arguments)
+     * @param callContext the call context (with the resolved arguments that precede the lambda)
      * @param argumentPos the position of the lambda argument
-     * @param currentParameterTypes the parameter types the body was first resolved with
+     * @param currentParameterTypes the parameter types the body was last resolved with
      * @param lambdaResultType the resolved type of the lambda body
      * @return refined parameter types of the same arity as {@code currentParameterTypes}, or an
-     *     empty optional to keep the current ones
+     *     empty optional to keep the current ones; both resolvers reject a different arity
      */
     Optional<List<DataType>> adjustLambdaParameterTypes(
             CallContext callContext,
             int argumentPos,
             List<DataType> currentParameterTypes,
             DataType lambdaResultType);
+
+    /**
+     * The maximum number of adjustments {@link #adjustLambdaParameterTypes} may make for one
+     * lambda. {@code ARRAY_REDUCE} needs at most two: one widening of the accumulator type and one
+     * widening to nullable.
+     */
+    int MAX_PARAMETER_TYPE_ADJUSTMENTS = 2;
 }

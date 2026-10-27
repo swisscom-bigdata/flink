@@ -1,0 +1,137 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License
+
+name: ARRAY_REDUCE
+summary: Folds an array into one value by applying a lambda to an accumulator and each element in turn.
+
+syntax:
+  sql: ARRAY_REDUCE(arr, initial_value, (acc, x) -> expr)
+  java: $("arr").arrayReduce(initialValue, (acc, x) -> expr)
+  python: |
+    col("arr").array_reduce(initial_value, lambda acc, x: expr)
+
+arguments:
+  - name: arr
+    type: ARRAY of any type
+    required: true
+    description: The array to fold.
+  - name: initial_value
+    type: Any type
+    required: true
+    description: The starting value of the accumulator.
+  - name: (acc, x) -> expr
+    type: Lambda with two parameters
+    required: true
+    description: Called once for each element, with the accumulator as `acc` and the element as `x`. Its result is the accumulator for the next element.
+
+returns:
+  description: The accumulator after the lambda has been called for the last element. For an empty array, `initial_value`.
+  nulls: Returns NULL if `arr` is NULL, or if the lambda returns NULL for the last element.
+  type: The accumulator type, see Usage notes. Nullable if `arr` or `initial_value` is nullable, or if the lambda can return NULL.
+
+notes:
+  - The elements are processed from first to last. A NULL element is passed to the lambda like any other element.
+  - The accumulator has the type of `initial_value` if the lambda's result fits it without loss. Otherwise it is widened once, when the statement is planned, to `STRING` for character strings, to `BYTES` for binary strings, to `DECIMAL(38, s)` for decimals and for an integer `initial_value` with a decimal result, and to the common type of both for other types. Arrays, maps and rows are widened element by element and field by field.
+  - The accumulator is only widened within one type family. A result that doesn't fit even then, such as a `DOUBLE` result for an `INT` `initial_value`, fails the statement. Cast `initial_value` to the type to accumulate in.
+  - Adding to a `DECIMAL(38, s)` with more than 6 digits after the decimal point gives a result with fewer digits, so such a sum fails the statement unless the lambda casts its result, such as to `DECIMAL(38, 7)`.
+  - In SQL, `FLOAT + DOUBLE` returns `FLOAT`, but in the Table API it returns `DOUBLE`, so the same lambda can give a different accumulator type. Cast `acc` to `DOUBLE` to get the same type in both.
+  - The lambda can use the columns of the query and the parameters of enclosing lambdas. See [Higher-Order Functions]({{< ref "docs/sql/built-in-functions/higher-order" >}}) for what a lambda can use.
+
+see_also:
+  - {name: ARRAY_TRANSFORM, ref: higher-order/array-transform}
+  - {name: ARRAY_FILTER, ref: higher-order/array-filter}
+  - {name: ARRAY_ZIP_WITH, ref: higher-order/array-zip-with}
+
+examples:
+  - title: Sum the elements
+    description: Start from `0` and add each element.
+    sql: |
+      SELECT arr, ARRAY_REDUCE(arr, 0, (acc, x) -> acc + x) AS `ARRAY_REDUCE(arr, 0, (acc, x) -> acc + x)`
+      FROM (VALUES (ARRAY[1, 2, 3]), (ARRAY[5])) AS t(arr);
+    result: |
+      | arr       | ARRAY_REDUCE(arr, 0, (acc, x) -> acc + x) |
+      |-----------|-------------------------------------------|
+      | [1, 2, 3] | 6                                         |
+      | [5]       | 5                                         |
+
+  - title: Concatenate strings
+    description: "`''` is a `CHAR(0)`, so the accumulator is widened to `STRING`."
+    sql: |
+      SELECT words,
+        ARRAY_REDUCE(words, '', (acc, x) -> acc || x) AS `ARRAY_REDUCE(words, '', (acc, x) -> acc || x)`,
+        TYPEOF(ARRAY_REDUCE(words, '', (acc, x) -> acc || x)) AS `TYPEOF(ARRAY_REDUCE(words, '', (acc, x) -> acc || x))`
+      FROM (VALUES (ARRAY['a', 'b', 'c'])) AS t(words);
+    result: |
+      | words     | ARRAY_REDUCE(words, '', (acc, x) -> acc \|\| x) | TYPEOF(ARRAY_REDUCE(words, '', (acc, x) -> acc \|\| x)) |
+      |-----------|-------------------------------------------------|---------------------------------------------------------|
+      | [a, b, c] | abc                                             | STRING NOT NULL                                         |
+
+  - title: Sum decimals
+    description: The integer `0` can't hold a decimal sum, so the accumulator is widened to `DECIMAL(38, 2)`.
+    sql: |
+      SELECT prices,
+        ARRAY_REDUCE(prices, 0, (acc, x) -> acc + x) AS `ARRAY_REDUCE(prices, 0, (acc, x) -> acc + x)`,
+        TYPEOF(ARRAY_REDUCE(prices, 0, (acc, x) -> acc + x)) AS `TYPEOF(ARRAY_REDUCE(prices, 0, (acc, x) -> acc + x))`
+      FROM (VALUES (ARRAY[1.25, 2.50])) AS t(prices);
+    result: |
+      | prices       | ARRAY_REDUCE(prices, 0, (acc, x) -> acc + x) | TYPEOF(ARRAY_REDUCE(prices, 0, (acc, x) -> acc + x)) |
+      |--------------|----------------------------------------------|------------------------------------------------------|
+      | [1.25, 2.50] | 3.75                                         | DECIMAL(38, 2) NOT NULL                              |
+
+  - title: Find the largest element
+    description: Start from NULL and keep the larger of the accumulator and the element.
+    sql: |
+      SELECT arr,
+        ARRAY_REDUCE(arr, CAST(NULL AS INT), (acc, x) -> IF(acc IS NULL OR x > acc, x, acc)) AS `ARRAY_REDUCE(arr, CAST(NULL AS INT), (acc, x) -> IF(acc IS NULL OR x > acc, x, acc))`
+      FROM (VALUES (ARRAY[3, 7, 5])) AS t(arr);
+    result: |
+      | arr       | ARRAY_REDUCE(arr, CAST(NULL AS INT), (acc, x) -> IF(acc IS NULL OR x > acc, x, acc)) |
+      |-----------|--------------------------------------------------------------------------------------|
+      | [3, 7, 5] | 7                                                                                    |
+
+  - title: Accumulate in another type
+    description: To add up `DOUBLE` values from `INT` elements, start from a `DOUBLE`. With `0`, the accumulator would be an `INT`, and the statement would fail.
+    sql: |
+      SELECT arr,
+        ARRAY_REDUCE(arr, CAST(0 AS DOUBLE), (acc, x) -> acc + x * 0.5e0) AS `ARRAY_REDUCE(arr, CAST(0 AS DOUBLE), (acc, x) -> acc + x * 0.5e0)`
+      FROM (VALUES (ARRAY[1, 2, 3])) AS t(arr);
+    result: |
+      | arr       | ARRAY_REDUCE(arr, CAST(0 AS DOUBLE), (acc, x) -> acc + x * 0.5e0) |
+      |-----------|-------------------------------------------------------------------|
+      | [1, 2, 3] | 3.0                                                               |
+
+  - title: Decimals with more than 6 digits after the decimal point
+    description: Cast the lambda's result to keep all 7 digits after the decimal point.
+    sql: |
+      SELECT arr,
+        ARRAY_REDUCE(arr, 0, (acc, x) -> CAST(acc + x AS DECIMAL(38, 7))) AS `ARRAY_REDUCE(arr, 0, (acc, x) -> CAST(acc + x AS DECIMAL(38, 7)))`
+      FROM (VALUES (ARRAY[CAST(1.1234567 AS DECIMAL(10, 7)), CAST(2.0000001 AS DECIMAL(10, 7))])) AS t(arr);
+    result: |
+      | arr                    | ARRAY_REDUCE(arr, 0, (acc, x) -> CAST(acc + x AS DECIMAL(38, 7))) |
+      |------------------------|-------------------------------------------------------------------|
+      | [1.1234567, 2.0000001] | 3.1234570                                                         |
+
+  - title: Empty and NULL arrays
+    description: An empty array returns `initial_value`, and a NULL array returns NULL.
+    sql: |
+      SELECT arr, ARRAY_REDUCE(arr, 0, (acc, x) -> acc + x) AS `ARRAY_REDUCE(arr, 0, (acc, x) -> acc + x)`
+      FROM (VALUES (ARRAY_REMOVE(ARRAY[1], 1)), (CAST(NULL AS ARRAY<INT>))) AS t(arr);
+    result: |
+      | arr  | ARRAY_REDUCE(arr, 0, (acc, x) -> acc + x) |
+      |------|-------------------------------------------|
+      | []   | 0                                         |
+      | NULL | NULL                                      |

@@ -1,0 +1,90 @@
+<?xml version="1.0" ?>
+<!--
+Licensed to the Apache Software Foundation (ASF) under one or more
+contributor license agreements.  See the NOTICE file distributed with
+this work for additional information regarding copyright ownership.
+The ASF licenses this file to you under the Apache License, Version 2.0
+(the "License"); you may not use this file except in compliance with
+the License.  You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<Root>
+  <TestCase name="testOverWindowInLambdaBody">
+    <Resource name="sql">
+      <![CDATA[SELECT ARRAY_TRANSFORM(a, x -> x + SUM(b) OVER (PARTITION BY c)) FROM T]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[ARRAY_TRANSFORM($0, (x) -> +(x, CASE(>(COUNT($1) OVER (PARTITION BY $2), 0), CAST(SUM($1) OVER (PARTITION BY $2)):INTEGER, null:INTEGER)))])
++- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+    <Resource name="optimized rel plan">
+      <![CDATA[
+LogicalProject(EXPR$0=[ARRAY_TRANSFORM($0, (x) -> +(x, CASE(>($3, 0), CAST($4):INTEGER, null:INTEGER)))])
++- LogicalProject(a=[$0], b=[$1], c=[$2], $f3=[COUNT($1) OVER (PARTITION BY $2)], $f4=[SUM($1) OVER (PARTITION BY $2)])
+   +- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testOverWindowInNestedLambdaBody">
+    <Resource name="sql">
+      <![CDATA[SELECT ARRAY_TRANSFORM(a, x -> ARRAY_TRANSFORM(a, y -> x + y + MAX(b) OVER ())) FROM T]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[ARRAY_TRANSFORM($0, (x) -> ARRAY_TRANSFORM($0, (y) -> +(+(x, y), MAX($1) OVER ())))])
++- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+    <Resource name="optimized rel plan">
+      <![CDATA[
+LogicalProject(EXPR$0=[ARRAY_TRANSFORM($0, (x) -> ARRAY_TRANSFORM($0, (y) -> +(+(x, y), $3)))])
++- LogicalProject(a=[$0], b=[$1], c=[$2], $f3=[MAX($1) OVER ()])
+   +- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testOverWindowOutsideLambdaIsNotMoved">
+    <Resource name="sql">
+      <![CDATA[SELECT SUM(b) OVER (), ARRAY_TRANSFORM(a, x -> x + c) FROM T]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[CASE(>(COUNT($1) OVER (), 0), SUM($1) OVER (), null:INTEGER)], EXPR$1=[ARRAY_TRANSFORM($0, (x) -> +(x, $2))])
++- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+    <Resource name="optimized rel plan">
+      <![CDATA[
+LogicalProject(EXPR$0=[CASE(>(COUNT($1) OVER (), 0), SUM($1) OVER (), null:INTEGER)], EXPR$1=[ARRAY_TRANSFORM($0, (x) -> +(x, $2))])
++- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testSameOverWindowInTwoCallsIsExtractedOnce">
+    <Resource name="sql">
+      <![CDATA[SELECT ARRAY_TRANSFORM(a, x -> x + SUM(b) OVER ()), ARRAY_FILTER(a, x -> x > SUM(b) OVER ()), ARRAY_FILTER(a, x -> x > MAX(b) OVER ()) FROM T]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[ARRAY_TRANSFORM($0, (x) -> +(x, CASE(>(COUNT($1) OVER (), 0), CAST(SUM($1) OVER ()):INTEGER, null:INTEGER)))], EXPR$1=[ARRAY_FILTER($0, (x) -> >(x, CASE(>(COUNT($1) OVER (), 0), CAST(SUM($1) OVER ()):INTEGER, null:INTEGER)))], EXPR$2=[ARRAY_FILTER($0, (x) -> >(x, MAX($1) OVER ()))])
++- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+    <Resource name="optimized rel plan">
+      <![CDATA[
+LogicalProject(EXPR$0=[ARRAY_TRANSFORM($0, (x) -> +(x, CASE(>($3, 0), CAST($4):INTEGER, null:INTEGER)))], EXPR$1=[ARRAY_FILTER($0, (x) -> >(x, CASE(>($3, 0), CAST($4):INTEGER, null:INTEGER)))], EXPR$2=[ARRAY_FILTER($0, (x) -> >(x, $5))])
++- LogicalProject(a=[$0], b=[$1], c=[$2], $f3=[COUNT($1) OVER ()], $f4=[SUM($1) OVER ()], $f5=[MAX($1) OVER ()])
+   +- LogicalTableScan(table=[[default_catalog, default_database, T]])
+]]>
+    </Resource>
+  </TestCase>
+</Root>

@@ -713,25 +713,25 @@ public class LogicalTypesTest {
                 .supportsInputConversion(Function4.class)
                 .supportsOutputConversion(Function4.class)
                 .doesNotSupportInputConversion(TriFunction.class);
-        // a zero-parameter lambda is a Function0; Supplier is its supertype rather than its
-        // conversion class, so it is not itself convertible
         assertThat(new FunctionType(0))
                 .hasSummaryString("FUNCTION(0)")
                 .supportsInputConversion(Function0.class)
                 .supportsOutputConversion(Function0.class)
-                .doesNotSupportInputConversion(Supplier.class)
                 .doesNotSupportInputConversion(Function.class);
-        // arities one to three additionally accept the equivalent JDK or Flink interface, which
-        // Function1, Function2 and Function3 extend, so either spelling may be declared or bridged
+        // only the FunctionN is a conversion class, not an interface of the same arity that it
+        // may extend
+        assertThat(new FunctionType(0))
+                .doesNotSupportInputConversion(Supplier.class)
+                .doesNotSupportOutputConversion(Supplier.class);
         assertThat(new FunctionType(1))
-                .supportsInputConversion(Function.class)
-                .supportsOutputConversion(Function.class);
+                .doesNotSupportInputConversion(Function.class)
+                .doesNotSupportOutputConversion(Function.class);
         assertThat(new FunctionType(2))
-                .supportsInputConversion(BiFunction.class)
-                .supportsOutputConversion(BiFunction.class);
+                .doesNotSupportInputConversion(BiFunction.class)
+                .doesNotSupportOutputConversion(BiFunction.class);
         assertThat(new FunctionType(3))
-                .supportsInputConversion(TriFunction.class)
-                .supportsOutputConversion(TriFunction.class);
+                .doesNotSupportInputConversion(TriFunction.class)
+                .doesNotSupportOutputConversion(TriFunction.class);
     }
 
     @Test

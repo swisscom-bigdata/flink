@@ -18,6 +18,7 @@
 package org.apache.flink.table.planner.plan.utils
 
 import org.apache.flink.table.planner.analyze.{FlinkStreamPlanAnalyzers, PlanAdvice}
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil
 import org.apache.flink.table.planner.hint.FlinkHints
 import org.apache.flink.table.planner.plan.metadata.FlinkRelMetadataQuery
 import org.apache.flink.table.planner.plan.nodes.physical.FlinkPhysicalRel
@@ -27,6 +28,7 @@ import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.core.{Aggregate, Correlate, Join, TableScan}
 import org.apache.calcite.rel.externalize.RelWriterImpl
 import org.apache.calcite.rel.hint.Hintable
+import org.apache.calcite.rex.RexNode
 import org.apache.calcite.sql.SqlExplainLevel
 import org.apache.calcite.util.Pair
 
@@ -201,7 +203,7 @@ class RelTreeWriterImpl(
         case value =>
           if (j == 0) s.append("(") else s.append(", ")
           j = j + 1
-          s.append(value.left).append("=[").append(value.right).append("]")
+          s.append(value.left).append("=[").append(display(rel, value.right)).append("]")
       }
       if (j > 0) s.append(")")
     }
@@ -297,5 +299,15 @@ class RelTreeWriterImpl(
                 QUERY_LEVEL_ADVICE.add(analyzedResult.getAdvice)
               })
     }
+  }
+
+  /**
+   * At the explain level, shows each lambda in an expression as written (see
+   * [[HigherOrderFunctionUtil.toWrittenForm]]). A digest keeps the lifted form.
+   */
+  private def display(rel: RelNode, value: AnyRef): AnyRef = value match {
+    case node: RexNode if explainLevel == SqlExplainLevel.EXPPLAN_ATTRIBUTES =>
+      HigherOrderFunctionUtil.toWrittenForm(node, rel.getCluster.getRexBuilder)
+    case other => other
   }
 }

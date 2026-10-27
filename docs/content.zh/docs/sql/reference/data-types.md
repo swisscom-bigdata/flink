@@ -1510,6 +1510,9 @@ lambda（例如 `x -> x + 1`）的类型。它用于高阶函数的参数。
 `CallContext#getLambdaArgument(int)` 暴露，这与 `DESCRIPTOR` 将其所描述的列交由
 `CallContext#getArgumentValue` 提供的方式相同。该类型本身只携带决定运行时表示的信息，即参数的个数。
 
+可空性不适用于该类型：lambda 永远不是一个值，因此不可能为 `NULL`。Flink 始终将该类型标记为可为 `NULL`，
+请求 `NOT NULL`（例如 `DataTypes.FUNCTION(1).notNull()`）不会改变该类型。
+
 运行时不支持将该类型作为值。它是转换和优化期间的纯辅助类型。表的列不能声明为该类型，它不能用作状态类型，
 函数也不能声明该类型的返回类型。它没有在 Python 的 `DataTypes` 中暴露；在 PyFlink 中，lambda 是宿主语言的可调用对象。
 
@@ -1534,18 +1537,17 @@ DataTypes.FUNCTION(1)
 
 **桥接到 JVM 类型**
 
-| Java 类型                                    | 输入 | 输出 | 备注                                                          |
-|:---------------------------------------------|:----:|:----:|:-------------------------------------------------------------|
-| `org.apache.flink.util.function.Function0`   |  X   |      | 零个参数                                                       |
-| `org.apache.flink.util.function.Function1`   |  X   |      | 一个参数；同样接受 `java.util.function.Function`                 |
-| `org.apache.flink.util.function.Function2`   |  X   |      | 两个参数；同样接受 `java.util.function.BiFunction`               |
-| `org.apache.flink.util.function.Function3`   |  X   |      | 三个参数；同样接受 `org.apache.flink.util.function.TriFunction`  |
-| `org.apache.flink.util.function.Function4`   |  X   |      | 四个参数                                                       |
+| Java 类型                                    | 输入 | 输出 | 备注     |
+|:---------------------------------------------|:----:|:----:|:---------|
+| `org.apache.flink.util.function.Function0`   |  X   |      | 零个参数 |
+| `org.apache.flink.util.function.Function1`   |  X   |      | 一个参数 |
+| `org.apache.flink.util.function.Function2`   |  X   |      | 两个参数 |
+| `org.apache.flink.util.function.Function3`   |  X   |      | 三个参数 |
+| `org.apache.flink.util.function.Function4`   |  X   |      | 四个参数 |
 
-与 lambda 参数个数相对应的 `FunctionN` 即为默认值。`Function1`、`Function2` 和 `Function3`
-只是继承了 `Function`、`BiFunction` 和 `TriFunction`，因此这些参数个数下两种写法均可声明或桥接。
-`java.util.function.Supplier` 是唯一的例外：由于 `Function0` 继承了它，`Supplier` 类型的参数可以
-被生成对象满足，但 `Supplier` 本身无法作为桥接目标，因为该对象的方法是 `apply()` 而非 `get()`。
+与 lambda 参数个数相对应的 `FunctionN` 即为默认值。`Function0`、`Function1` 和 `Function2`
+继承了 `java.util.function.Supplier`、`Function` 和 `BiFunction`，因此接收到的对象可以传给需要这些
+接口的 API。这些接口本身不能作为桥接目标。
 
 {{< /tab >}}
 {{< /tabs >}}

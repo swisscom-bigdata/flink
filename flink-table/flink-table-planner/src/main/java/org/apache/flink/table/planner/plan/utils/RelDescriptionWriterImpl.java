@@ -18,12 +18,14 @@
 
 package org.apache.flink.table.planner.plan.utils;
 
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil;
 import org.apache.flink.table.planner.plan.nodes.FlinkRelNode;
 
 import org.apache.flink.shaded.guava33.com.google.common.collect.ImmutableList;
 
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelWriter;
+import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.util.Pair;
 
@@ -64,7 +66,13 @@ public class RelDescriptionWriterImpl implements RelWriter {
             } else {
                 s.append(", ");
             }
-            s.append(value.getKey()).append("=[").append(value.getValue()).append("]");
+            final Object shown =
+                    value.getValue() instanceof RexNode
+                            // a description is for reading: show each lambda as written
+                            ? HigherOrderFunctionUtil.toWrittenForm(
+                                    (RexNode) value.getValue(), rel.getCluster().getRexBuilder())
+                            : value.getValue();
+            s.append(value.getKey()).append("=[").append(shown).append("]");
         }
         if (j > 0) {
             s.append(")");

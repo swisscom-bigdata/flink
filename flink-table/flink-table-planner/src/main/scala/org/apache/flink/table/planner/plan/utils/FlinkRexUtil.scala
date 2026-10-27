@@ -19,6 +19,7 @@ package org.apache.flink.table.planner.plan.utils
 
 import org.apache.flink.table.planner.{JInt, JList, JMap}
 import org.apache.flink.table.planner.functions.sql.SqlTryCastFunction
+import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil
 import org.apache.flink.table.planner.plan.nodes.calcite.{LegacySink, Sink}
 import org.apache.flink.table.planner.plan.optimize.RelNodeBlock
 import org.apache.flink.table.planner.plan.utils.ExpressionDetail.ExpressionDetail
@@ -45,6 +46,7 @@ import java.util
 import java.util.Optional
 import java.util.function.Predicate
 
+import scala.annotation.tailrec
 import scala.collection.JavaConversions._
 
 /** Utility methods concerning [[RexNode]]. */
@@ -327,6 +329,35 @@ object FlinkRexUtil {
       localExprsTable: Option[IndexedSeq[RexNode]],
       expressionFormat: ExpressionFormat,
       expressionDetail: ExpressionDetail): String = {
+    toExpressionString(
+      expr,
+      inFields,
+      localExprsTable,
+      expressionFormat,
+      expressionDetail,
+      Map.empty[Int, String])
+  }
+
+  /**
+   * See [[getExpressionString]]. `lambdaValues` holds, by parameter index, the text that a
+   * parameter of the lambda being printed prints as, if the lambda is shown as written.
+   */
+  private def toExpressionString(
+      expr: RexNode,
+      inFields: Seq[String],
+      localExprsTable: Option[IndexedSeq[RexNode]],
+      expressionFormat: ExpressionFormat,
+      expressionDetail: ExpressionDetail,
+      lambdaValues: Map[Int, String]): String = {
+    def print(node: RexNode, values: Map[Int, String] = lambdaValues): String =
+      toExpressionString(
+        node,
+        inFields,
+        localExprsTable,
+        expressionFormat,
+        expressionDetail,
+        values)
+
     expr match {
       case pr: RexPatternFieldRef =>
         val alpha = pr.getAlpha
@@ -371,80 +402,168 @@ object FlinkRexUtil {
             "local expression table")
 
       case l: RexLocalRef =>
-        val lExpr = localExprsTable.get(l.getIndex)
-        getExpressionString(lExpr, inFields, localExprsTable, expressionFormat, expressionDetail)
+        print(localExprsTable.get(l.getIndex))
+
+      case c: RexCall
+          if expressionDetail == ExpressionDetail.Explain &&
+            captureOperandCount(c, localExprsTable) > 0 =>
+        writtenHigherOrderCall(c, localExprsTable, print(_), print(_, _))
 
       case c: RexCall =>
-        val op = c.getOperator.toString
-        val ops = c.getOperands.map(
-          getExpressionString(_, inFields, localExprsTable, expressionFormat, expressionDetail))
-        c.getOperator match {
-          case _: SqlAsOperator => ops.head
-          case _: SqlCastFunction | _: SqlTryCastFunction =>
-            val typeStr = expressionDetail match {
-              case ExpressionDetail.Digest => c.getType.getFullTypeString
-              case ExpressionDetail.Explain => c.getType.toString
-            }
-            s"$op(${ops.head} AS $typeStr)"
-          case _ =>
-            if (ops.size() == 1) {
-              val operand = ops.head
-              expressionFormat match {
-                case ExpressionFormat.Infix =>
-                  c.getKind match {
-                    case SqlKind.IS_FALSE | SqlKind.IS_NOT_FALSE | SqlKind.IS_TRUE |
-                        SqlKind.IS_NOT_TRUE | SqlKind.IS_UNKNOWN | SqlKind.IS_NULL |
-                        SqlKind.IS_NOT_NULL =>
-                      s"$operand $op"
-                    case _ => s"$op($operand)"
-                  }
-                case ExpressionFormat.PostFix => s"$operand $op"
-                case ExpressionFormat.Prefix => s"$op($operand)"
-              }
-            } else {
-              c.getKind match {
-                case SqlKind.TIMES | SqlKind.DIVIDE | SqlKind.PLUS | SqlKind.MINUS |
-                    SqlKind.LESS_THAN | SqlKind.LESS_THAN_OR_EQUAL | SqlKind.GREATER_THAN |
-                    SqlKind.GREATER_THAN_OR_EQUAL | SqlKind.EQUALS | SqlKind.NOT_EQUALS |
-                    SqlKind.OR | SqlKind.AND =>
-                  expressionFormat match {
-                    case ExpressionFormat.Infix => s"(${ops.mkString(s" $op ")})"
-                    case ExpressionFormat.PostFix => s"(${ops.mkString(", ")})$op"
-                    case ExpressionFormat.Prefix => s"$op(${ops.mkString(", ")})"
-                  }
-                case _ => s"$op(${ops.mkString(", ")})"
-              }
-            }
-        }
+        callString(c, c.getOperands.map(print(_)), expressionFormat, expressionDetail)
 
       case fa: RexFieldAccess =>
-        val referenceExpr = getExpressionString(
-          fa.getReferenceExpr,
-          inFields,
-          localExprsTable,
-          expressionFormat,
-          expressionDetail)
+        val referenceExpr = print(fa.getReferenceExpr)
         val field = fa.getField.getName
         s"$referenceExpr.$field"
       case cv: RexCorrelVariable =>
         cv.toString
       case lambda: RexLambda =>
-        val params = lambda.getParameters.map(
-          getExpressionString(_, inFields, localExprsTable, expressionFormat, expressionDetail))
-        val body = getExpressionString(
-          lambda.getExpression,
-          inFields,
-          localExprsTable,
-          expressionFormat,
-          expressionDetail)
+        // A lambda is its own scope: its parameters, captures included, print their names.
+        val params = lambda.getParameters.map(print(_, Map.empty[Int, String]))
+        val body = print(lambda.getExpression, Map.empty[Int, String])
         val paramStr =
           if (params.size() == 1) params.head else s"(${params.mkString(", ")})"
         s"$paramStr -> $body"
       case lambdaRef: RexLambdaRef =>
-        lambdaRef.getName
+        lambdaValues.getOrElse(lambdaRef.getIndex, lambdaRef.getName)
       case _ =>
         throw new IllegalArgumentException(s"Unknown expression type '${expr.getClass}': $expr")
     }
+  }
+
+  private def callString(
+      c: RexCall,
+      ops: Seq[String],
+      expressionFormat: ExpressionFormat,
+      expressionDetail: ExpressionDetail): String = {
+    val op = c.getOperator.toString
+    c.getOperator match {
+      case _: SqlAsOperator => ops.head
+      case _: SqlCastFunction | _: SqlTryCastFunction =>
+        val typeStr = expressionDetail match {
+          case ExpressionDetail.Digest => c.getType.getFullTypeString
+          case ExpressionDetail.Explain => c.getType.toString
+        }
+        s"$op(${ops.head} AS $typeStr)"
+      case _ =>
+        if (ops.size == 1) {
+          val operand = ops.head
+          expressionFormat match {
+            case ExpressionFormat.Infix =>
+              c.getKind match {
+                case SqlKind.IS_FALSE | SqlKind.IS_NOT_FALSE | SqlKind.IS_TRUE |
+                    SqlKind.IS_NOT_TRUE | SqlKind.IS_UNKNOWN | SqlKind.IS_NULL |
+                    SqlKind.IS_NOT_NULL =>
+                  s"$operand $op"
+                case _ => s"$op($operand)"
+              }
+            case ExpressionFormat.PostFix => s"$operand $op"
+            case ExpressionFormat.Prefix => s"$op($operand)"
+          }
+        } else {
+          c.getKind match {
+            case SqlKind.TIMES | SqlKind.DIVIDE | SqlKind.PLUS | SqlKind.MINUS | SqlKind.LESS_THAN |
+                SqlKind.LESS_THAN_OR_EQUAL | SqlKind.GREATER_THAN | SqlKind.GREATER_THAN_OR_EQUAL |
+                SqlKind.EQUALS | SqlKind.NOT_EQUALS | SqlKind.OR | SqlKind.AND =>
+              expressionFormat match {
+                case ExpressionFormat.Infix => s"(${ops.mkString(s" $op ")})"
+                case ExpressionFormat.PostFix => s"(${ops.mkString(", ")})$op"
+                case ExpressionFormat.Prefix => s"$op(${ops.mkString(", ")})"
+              }
+            case _ => s"$op(${ops.mkString(", ")})"
+          }
+        }
+    }
+  }
+
+  /**
+   * Prints a higher-order call with its lambdas as written, for `EXPLAIN` only: each capture
+   * parameter in a lambda body prints as the value that the call passes for it, and the call's
+   * capture operands are left out. A parameter whose name such a value would use prints renamed
+   * (see [[HigherOrderFunctionUtil.writtenParameterNames]]). The digest of an expression always
+   * keeps the lifted form.
+   *
+   * @param printHere
+   *   prints an operand of the call, in the scope of the call
+   * @param printBody
+   *   prints a lambda body, given the text that each of its parameters prints as
+   */
+  private def writtenHigherOrderCall(
+      call: RexCall,
+      localExprsTable: Option[IndexedSeq[RexNode]],
+      printHere: RexNode => String,
+      printBody: (RexNode, Map[Int, String]) => String): String = {
+    val operands = call.getOperands.toIndexedSeq
+    val regularCount = operands.size - captureOperandCount(call, localExprsTable)
+    val capturedTypes = operands.drop(regularCount).map(_.getType)
+    val capturedValues = operands.drop(regularCount).map(printHere)
+    var valuePos = 0
+    val printed = new util.ArrayList[String]()
+    for (operand <- operands.take(regularCount)) {
+      resolveLocalRef(operand, localExprsTable) match {
+        case lambda: RexLambda =>
+          val count = HigherOrderFunctionUtil.captureCount(lambda)
+          val valueTexts = capturedValues.slice(valuePos, valuePos + count).toList
+          val valueTypes = capturedTypes.slice(valuePos, valuePos + count).toList
+          valuePos += count
+          val names = HigherOrderFunctionUtil.writtenParameterNames(lambda, valueTexts).toList
+          val (captures, declared) =
+            lambda.getParameters.toList.partition(HigherOrderFunctionUtil.isCaptureParameter)
+          val texts =
+            captures.map(_.getIndex).zip(valueTexts) ++ declared.map(_.getIndex).zip(names)
+          val body = printBody(
+            withoutCapturesCastToTheirType(
+              lambda.getExpression,
+              captures.map(_.getIndex).zip(valueTypes).toMap),
+            texts.toMap)
+          val paramStr = if (names.size == 1) names.head else s"(${names.mkString(", ")})"
+          printed.add(s"$paramStr -> $body")
+        case _ =>
+          printed.add(printHere(operand))
+      }
+    }
+    s"${call.getOperator}(${printed.mkString(", ")})"
+  }
+
+  /**
+   * Removes a cast of a capture parameter to the type that its value already has, such as the cast
+   * that turns a captured time attribute into a timestamp. It does nothing once the value is shown
+   * in place of the parameter.
+   */
+  private def withoutCapturesCastToTheirType(
+      body: RexNode,
+      valueTypes: Map[Int, RelDataType]): RexNode =
+    body.accept(new RexShuttle {
+      override def visitCall(call: RexCall): RexNode = call.getOperands.toList match {
+        case (ref: RexLambdaRef) :: Nil
+            if call.getKind == SqlKind.CAST && valueTypes
+              .get(ref.getIndex)
+              .contains(call.getType) =>
+          ref
+        case _ => super.visitCall(call)
+      }
+
+      // A nested lambda prints its own captures.
+      override def visitLambda(lambda: RexLambda): RexNode = lambda
+    })
+
+  /** The number of capture operands of `call`, i.e. of its lambdas' capture parameters. */
+  private def captureOperandCount(
+      call: RexCall,
+      localExprsTable: Option[IndexedSeq[RexNode]]): Int =
+    call.getOperands
+      .map(resolveLocalRef(_, localExprsTable))
+      .collect { case lambda: RexLambda => HigherOrderFunctionUtil.captureCount(lambda) }
+      .sum
+
+  @tailrec
+  private def resolveLocalRef(
+      node: RexNode,
+      localExprsTable: Option[IndexedSeq[RexNode]]): RexNode = node match {
+    case localRef: RexLocalRef if localExprsTable.isDefined =>
+      resolveLocalRef(localExprsTable.get(localRef.getIndex), localExprsTable)
+    case other => other
   }
 
   /**

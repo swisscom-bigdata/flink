@@ -76,6 +76,7 @@ import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLambda;
 import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexPatternFieldRef;
@@ -805,6 +806,26 @@ public final class RelTimeIndicatorConverter extends RelHomogeneousShuttle {
         }
     }
 
+    /**
+     * A lambda has the type of its body, so it must not be materialized like a value: the function
+     * would receive a timestamp instead of the lambda. Instead, a body that returns a time
+     * attribute casts its result to a regular timestamp. After capture lifting, a body reads a time
+     * attribute only from a parameter, which the call fills with a value that is materialized
+     * outside the lambda, so the cast is all the body needs.
+     */
+    private RexNode materializeLambdaResult(RexLambda lambda) {
+        final RexNode body = lambda.getExpression();
+        if (!isTimeIndicatorType(body.getType())) {
+            return lambda;
+        }
+        final RexNode materializedBody =
+                rexBuilder.makeAbstractCast(
+                        timestamp(body.getType().isNullable(), isTimestampLtzType(body.getType())),
+                        body,
+                        false);
+        return rexBuilder.makeLambdaCall(materializedBody, lambda.getParameters());
+    }
+
     private void validateType(RelDataType l, RelDataType r) {
         boolean isValid;
         // check if time indicators match
@@ -911,7 +932,12 @@ public final class RelTimeIndicatorConverter extends RelHomogeneousShuttle {
             } else {
                 materializedOperands =
                         updatedCall.getOperands().stream()
-                                .map(RelTimeIndicatorConverter.this::materializeTimeIndicators)
+                                .map(
+                                        operand ->
+                                                operand instanceof RexLambda
+                                                        ? materializeLambdaResult(
+                                                                (RexLambda) operand)
+                                                        : materializeTimeIndicators(operand))
                                 .collect(Collectors.toList());
             }
 

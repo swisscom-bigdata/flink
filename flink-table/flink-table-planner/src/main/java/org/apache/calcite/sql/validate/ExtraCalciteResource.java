@@ -51,4 +51,37 @@ public interface ExtraCalciteResource {
                     + "be evaluated over; only the columns of the enclosing query can be used here.")
     Resources.ExInst<SqlValidatorException> unsupportedOverLambdaParameterInLambdaBody(
             String construct, String parameter);
+
+    @Resources.BaseMessage(
+            "Subqueries over a lambda parameter are not supported in the body of a lambda "
+                    + "expression. ''{0}'' is a lambda parameter, which exists per element and has "
+                    + "no group to be evaluated over; only the columns of the enclosing query can "
+                    + "be used here. Inside a subquery in a lambda body an unqualified name ''{0}'' "
+                    + "always refers to the lambda parameter, also where the subquery defines a "
+                    + "column of that name. If the subquery is not meant to use the lambda "
+                    + "parameter, qualify its own column with its table alias (for example "
+                    + "''q.{0}'') or rename the lambda parameter.")
+    Resources.ExInst<SqlValidatorException> unsupportedSubqueryOverLambdaParameterInLambdaBody(
+            String parameter);
+
+    @Resources.BaseMessage(
+            "CURRENT_WATERMARK over a lambda parameter is not supported in the body of a lambda "
+                    + "expression. ''{0}'' is a lambda parameter, which exists per element; "
+                    + "CURRENT_WATERMARK reads the watermark of the operator once per row and can "
+                    + "only be applied to a time attribute column of the enclosing query.")
+    Resources.ExInst<SqlValidatorException> currentWatermarkOverLambdaParameterInLambdaBody(
+            String parameter);
+
+    @Resources.BaseMessage(
+            "A lambda body in ORDER BY cannot use the select-list alias ''{0}''. A lambda body "
+                    + "sees the columns of the FROM clause, not the aliases of the select list. "
+                    + "Write the aliased expression instead, or qualify the column with its table "
+                    + "alias if a column named ''{0}'' is meant.")
+    Resources.ExInst<SqlValidatorException> selectAliasInOrderByLambdaBody(String alias);
+
+    @Resources.BaseMessage(
+            "Lambda expressions are not supported in the {0} clause of MATCH_RECOGNIZE. Compute "
+                    + "the value in the input table of MATCH_RECOGNIZE instead, for example in a "
+                    + "sub-query, and use its column here.")
+    Resources.ExInst<SqlValidatorException> lambdaInMatchRecognize(String clause);
 }

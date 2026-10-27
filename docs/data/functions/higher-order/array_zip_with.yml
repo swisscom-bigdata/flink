@@ -1,0 +1,103 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License
+
+name: ARRAY_ZIP_WITH
+summary: Combines two arrays element by element with a lambda.
+
+syntax:
+  sql: ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> expr)
+  java: $("arr1").arrayZipWith($("arr2"), (x, y) -> expr)
+  python: |
+    col("arr1").array_zip_with(col("arr2"), lambda x, y: expr)
+
+arguments:
+  - name: arr1
+    type: ARRAY of any type
+    required: true
+    description: The first array.
+  - name: arr2
+    type: ARRAY of any type
+    required: true
+    description: The second array. Its element type may differ from that of `arr1`.
+  - name: (x, y) -> expr
+    type: Lambda with two parameters
+    required: true
+    description: Called once for each position, with the element of `arr1` as `x` and the element of `arr2` as `y`. Its result becomes the element at that position.
+
+returns:
+  description: An array with the lambda's result for each position. It is as long as the longer of the two arrays.
+  nulls: Returns NULL if `arr1` or `arr2` is NULL. Two empty arrays return an empty array.
+  type: "`ARRAY` of the lambda's result type. Nullable if `arr1` or `arr2` is nullable."
+
+notes:
+  - The shorter array is padded with NULL. At a position past its end, the lambda gets NULL for its element, also if the array's elements are NOT NULL. Use `COALESCE` in the lambda to replace it.
+  - The lambda can use the columns of the query and the parameters of enclosing lambdas. See [Higher-Order Functions]({{< ref "docs/sql/built-in-functions/higher-order" >}}) for what a lambda can use.
+
+see_also:
+  - {name: ARRAY_TRANSFORM, ref: higher-order/array-transform}
+  - {name: ARRAY_FILTER, ref: higher-order/array-filter}
+  - {name: ARRAY_REDUCE, ref: higher-order/array-reduce}
+
+examples:
+  - title: Add two arrays
+    description: Add the elements at each position.
+    sql: |
+      SELECT arr1, arr2, ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> x + y) AS `ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> x + y)`
+      FROM (VALUES (ARRAY[1, 2, 3], ARRAY[10, 20, 30])) AS t(arr1, arr2);
+    result: |
+      | arr1      | arr2         | ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> x + y) |
+      |-----------|--------------|---------------------------------------------|
+      | [1, 2, 3] | [10, 20, 30] | [11, 22, 33]                                |
+
+  - title: Arrays of different lengths
+    description: "`arr1` is padded with NULL, so `x + y` is NULL at the last position. `COALESCE` replaces the missing element with `0`."
+    sql: |
+      SELECT arr1, arr2,
+        ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> x + y) AS `ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> x + y)`,
+        ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> COALESCE(x, 0) + y) AS `ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> COALESCE(x, 0) + y)`
+      FROM (VALUES (ARRAY[1, 2], ARRAY[3, 4, 5])) AS t(arr1, arr2);
+    result: |
+      | arr1   | arr2      | ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> x + y) | ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> COALESCE(x, 0) + y) |
+      |--------|-----------|---------------------------------------------|----------------------------------------------------------|
+      | [1, 2] | [3, 4, 5] | [4, 6, NULL]                                | [4, 6, 5]                                                |
+
+  - title: Combine arrays of different types
+    description: Pair each name with its score.
+    sql: |
+      SELECT names, scores,
+        ARRAY_ZIP_WITH(names, scores, (n, s) -> n || '=' || CAST(s AS STRING)) AS `ARRAY_ZIP_WITH(names, scores, (n, s) -> n || '=' || CAST(s AS STRING))`
+      FROM (VALUES (ARRAY['ann', 'bob'], ARRAY[90, 75])) AS t(names, scores);
+    result: |
+      | names      | scores   | ARRAY_ZIP_WITH(names, scores, (n, s) -> n \|\| '=' \|\| CAST(s AS STRING)) |
+      |------------|----------|----------------------------------------------------------------------------|
+      | [ann, bob] | [90, 75] | [ann=90, bob=75]                                                           |
+
+  - title: Empty and NULL arrays
+    description: Two empty arrays return an empty array. With one empty array, the other one is combined with NULL. A NULL array returns NULL.
+    sql: |
+      SELECT arr1, arr2,
+        ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> COALESCE(x, 0) + COALESCE(y, 0)) AS `ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> COALESCE(x, 0) + COALESCE(y, 0))`
+      FROM (VALUES
+        (ARRAY_REMOVE(ARRAY[1], 1), ARRAY_REMOVE(ARRAY[1], 1)),
+        (ARRAY_REMOVE(ARRAY[1], 1), ARRAY[1, 2]),
+        (CAST(NULL AS ARRAY<INT>), ARRAY[1, 2])) AS t(arr1, arr2);
+    result: |
+      | arr1 | arr2   | ARRAY_ZIP_WITH(arr1, arr2, (x, y) -> COALESCE(x, 0) + COALESCE(y, 0)) |
+      |------|--------|-----------------------------------------------------------------------|
+      | []   | []     | []                                                                    |
+      | []   | [1, 2] | [1, 2]                                                                |
+      | NULL | [1, 2] | NULL                                                                  |

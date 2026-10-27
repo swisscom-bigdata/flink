@@ -50,14 +50,16 @@ class HigherOrderFunctionTests(object):
         self.assertEqual(sorted(map(str, actual)), sorted(map(str, expected)))
 
     def test_array_transform_unary_lambda(self):
-        # ARRAY_TRANSFORM with a single-parameter lambda (java.util.function.Function adapter).
+        # ARRAY_TRANSFORM with a single-parameter lambda (org.apache.flink.util.function.Function1
+        # adapter).
         table = self._array_source() \
             .select(col("a").array_transform(lambda x: x + 1).alias("b"))
         self._assert_rows(table, [Row([2, 3, 4]), Row([5, 6])])
 
     def test_array_reduce_binary_lambda(self):
-        # ARRAY_REDUCE with a two-parameter lambda (java.util.function.BiFunction adapter). The
-        # accumulator type is the type of the initial value (INT), so the result is INT too.
+        # ARRAY_REDUCE with a two-parameter lambda (org.apache.flink.util.function.Function2
+        # adapter). The accumulator type is the type of the initial value (INT), so the result is
+        # INT too.
         table = self._array_source() \
             .select(col("a").array_reduce(lit(0), lambda acc, x: acc + x).alias("b"))
         self._assert_rows(table, [Row(6), Row(9)])

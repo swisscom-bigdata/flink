@@ -1,0 +1,110 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License
+
+name: ARRAY_TRANSFORM
+summary: Applies a lambda to each element of an array and returns the array of the results.
+
+syntax:
+  sql: ARRAY_TRANSFORM(arr, x -> expr)
+  java: $("arr").arrayTransform(x -> expr)
+  python: |
+    col("arr").array_transform(lambda x: expr)
+
+arguments:
+  - name: arr
+    type: ARRAY of any type
+    required: true
+    description: The array to transform.
+  - name: x -> expr
+    type: Lambda with one parameter
+    required: true
+    description: Called once for each element, with the element as `x`. Its result becomes the element at the same position of the result.
+
+returns:
+  description: An array with the lambda's result for each element of `arr`, in the order of the elements.
+  nulls: Returns NULL if `arr` is NULL. An empty array returns an empty array.
+  type: "`ARRAY` of the lambda's result type. Nullable if `arr` is nullable."
+
+notes:
+  - A NULL element is passed to the lambda like any other element.
+  - The lambda can use the columns of the query and the parameters of enclosing lambdas. See [Higher-Order Functions]({{< ref "docs/sql/built-in-functions/higher-order" >}}) for what a lambda can use.
+
+see_also:
+  - {name: ARRAY_FILTER, ref: higher-order/array-filter}
+  - {name: ARRAY_REDUCE, ref: higher-order/array-reduce}
+  - {name: ARRAY_ZIP_WITH, ref: higher-order/array-zip-with}
+
+examples:
+  - title: Transform each element
+    description: Multiply each element by 10.
+    sql: |
+      SELECT arr, ARRAY_TRANSFORM(arr, x -> x * 10) AS `ARRAY_TRANSFORM(arr, x -> x * 10)`
+      FROM (VALUES (ARRAY[1, 2, 3]), (ARRAY[5])) AS t(arr);
+    result: |
+      | arr       | ARRAY_TRANSFORM(arr, x -> x * 10) |
+      |-----------|-----------------------------------|
+      | [1, 2, 3] | [10, 20, 30]                      |
+      | [5]       | [50]                              |
+
+  - title: Use a column of the query
+    description: The lambda adds the `base` of the same row to each element.
+    sql: |
+      SELECT arr, base, ARRAY_TRANSFORM(arr, x -> x + base) AS `ARRAY_TRANSFORM(arr, x -> x + base)`
+      FROM (VALUES (ARRAY[1, 2, 3], 10), (ARRAY[5], 100)) AS t(arr, base);
+    result: |
+      | arr       | base | ARRAY_TRANSFORM(arr, x -> x + base) |
+      |-----------|------|-------------------------------------|
+      | [1, 2, 3] | 10   | [11, 12, 13]                        |
+      | [5]       | 100  | [105]                               |
+
+  - title: Change the element type
+    description: The lambda returns a BOOLEAN, so the result is an array of BOOLEAN values.
+    sql: |
+      SELECT arr,
+        ARRAY_TRANSFORM(arr, x -> x > 1) AS `ARRAY_TRANSFORM(arr, x -> x > 1)`,
+        TYPEOF(ARRAY_TRANSFORM(arr, x -> x > 1)) AS `TYPEOF(ARRAY_TRANSFORM(arr, x -> x > 1))`
+      FROM (VALUES (ARRAY[1, 2, 3])) AS t(arr);
+    result: |
+      | arr       | ARRAY_TRANSFORM(arr, x -> x > 1) | TYPEOF(ARRAY_TRANSFORM(arr, x -> x > 1)) |
+      |-----------|----------------------------------|------------------------------------------|
+      | [1, 2, 3] | [FALSE, TRUE, TRUE]              | ARRAY<BOOLEAN NOT NULL> NOT NULL         |
+
+  - title: Nested lambdas
+    description: For each element, keep the elements of the same array that are larger. The inner lambda reads `x`, the parameter of the outer one.
+    sql: |
+      SELECT arr,
+        ARRAY_TRANSFORM(arr, x -> ARRAY_FILTER(arr, y -> y > x)) AS `ARRAY_TRANSFORM(arr, x -> ARRAY_FILTER(arr, y -> y > x))`
+      FROM (VALUES (ARRAY[1, 2, 3])) AS t(arr);
+    result: |
+      | arr       | ARRAY_TRANSFORM(arr, x -> ARRAY_FILTER(arr, y -> y > x)) |
+      |-----------|----------------------------------------------------------|
+      | [1, 2, 3] | [[2, 3], [3], []]                                        |
+
+  - title: NULL elements, empty and NULL arrays
+    description: The NULL element is passed to the lambda, and `NULL * 10` is NULL. An empty array returns an empty array, and a NULL array returns NULL.
+    sql: |
+      SELECT arr, ARRAY_TRANSFORM(arr, x -> x * 10) AS `ARRAY_TRANSFORM(arr, x -> x * 10)`
+      FROM (VALUES
+        (ARRAY[1, CAST(NULL AS INT)]),
+        (ARRAY_REMOVE(ARRAY[1], 1)),
+        (CAST(NULL AS ARRAY<INT>))) AS t(arr);
+    result: |
+      | arr       | ARRAY_TRANSFORM(arr, x -> x * 10) |
+      |-----------|-----------------------------------|
+      | [1, NULL] | [10, NULL]                        |
+      | []        | []                                |
+      | NULL      | NULL                              |

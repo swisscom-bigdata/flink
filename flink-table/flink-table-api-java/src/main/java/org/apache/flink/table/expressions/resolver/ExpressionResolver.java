@@ -270,10 +270,10 @@ public class ExpressionResolver {
     public ResolvedExpression resolveLambdaBody(
             Expression body, List<LocalReferenceExpression> parameters) {
         // The parameters in scope are those of this lambda plus those of any enclosing lambdas,
-        // with
-        // this lambda's parameters shadowing enclosing ones of the same name (declaration order is
-        // kept so the outer-to-inner scope order is preserved). Keying by name is unambiguous
-        // because a lambda's own parameter names are unique (see UnresolvedLambdaExpression).
+        // with this lambda's parameters shadowing enclosing ones of the same name (declaration
+        // order is kept so the outer-to-inner scope order is preserved). Keying by name is
+        // unambiguous because a lambda's own parameter names are unique (see
+        // UnresolvedLambdaExpression).
         final Map<String, LocalReferenceExpression> scopeParameters = new LinkedHashMap<>();
         for (LocalReferenceExpression enclosing : enclosingLambdaParameters) {
             scopeParameters.put(enclosing.getName(), enclosing);

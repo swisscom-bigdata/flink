@@ -25,8 +25,7 @@ import java.util.function.Function;
 /**
  * Function which takes one argument.
  *
- * <p>This is the arity-1 member of the {@code FunctionN} family. It extends {@link Function} so
- * that a function declared against that type keeps working unchanged.
+ * <p>It extends {@link Function} so that it can be passed to APIs that expect one.
  *
  * @param <T1> type of the first argument
  * @param <R> type of the return value

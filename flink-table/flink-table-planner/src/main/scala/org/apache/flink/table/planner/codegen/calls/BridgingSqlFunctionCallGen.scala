@@ -79,7 +79,8 @@ class BridgingSqlFunctionCallGen(call: RexCall, rexProgram: RexProgram) extends 
         declaredCall,
         rexProgram,
         Collections.emptyList()),
-      declaredCall.getType)
+      declaredCall.getType,
+      /* lambdaBodiesAvailable */ true)
 
     // create the final UDF for runtime
     val evaluatorFactory =
@@ -116,9 +117,9 @@ class BridgingSqlFunctionCallGen(call: RexCall, rexProgram: RexProgram) extends 
    * (parameters added by
    * [[org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil]], numbered from
    * {@code CAPTURE_PARAM_INDEX_BASE}), which equals the number of trailing capture operands. A call
-   * may carry more than one lambda operand (a user-defined function declaring several lambda
-   * arguments); each lambda contributes its own captures. Zero if the call has no lambda operand or
-   * no lambda captures anything.
+   * may carry more than one lambda operand (a function may declare several lambda arguments); each
+   * lambda contributes its own captures. Zero if the call has no lambda operand or no lambda
+   * captures anything.
    */
   private def lambdaCaptureCount(call: RexCall): Int = {
     call.getOperands.asScala

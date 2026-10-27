@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.functions.inference;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.sql.parser.type.SqlRawTypeNameSpec;
+import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.functions.BuiltInFunctionDefinition;
@@ -46,6 +47,7 @@ import org.apache.flink.table.types.utils.TypeConversions;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.StructKind;
+import org.apache.calcite.runtime.CalciteContextException;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlDataTypeSpec;
@@ -75,6 +77,7 @@ import javax.annotation.Nullable;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -145,6 +148,13 @@ public final class TypeInferenceOperandChecker
                 throw createInvalidCallException(callContext, e);
             }
             return false;
+        } catch (CalciteContextException e) {
+            // A validation error of a lambda body, raised when the lambda is re-validated against
+            // its bound parameters. This happens here rather than in the operand inference for a
+            // lambda nested in another lambda's body, e.g. an unknown field in
+            // ARRAY_TRANSFORM(a, x -> ARRAY_TRANSFORM(rs, r -> r.unknown)). It already carries the
+            // position and the message of the user error, so it is reported as is.
+            throw e;
         } catch (Throwable t) {
             throw createUnexpectedException(callContext, t);
         }
@@ -243,19 +253,16 @@ public final class TypeInferenceOperandChecker
 
     private boolean checkOperandTypesOrError(SqlCallBinding callBinding, CallContext callContext) {
         // This call may be nested inside an enclosing lambda whose parameter it depends on: either
-        // a
-        // nested higher-order function, or an ordinary function applied to the parameter such as
+        // a nested higher-order function, or an ordinary function applied to the parameter such as
         // IFNULL(param, 0). During the first validation of the enclosing lambda body the parameter
         // is not yet bound (its operands are transiently ANY), so defer: the enclosing operand
-        // checker re-validates the lambda body once it has bound its parameter. Mirrors the
-        // built-in
-        // array higher-order function operand checkers (e.g. ArrayTransformOperandTypeChecker).
+        // checker re-validates the lambda body once it has bound its parameter.
         if (hasUnresolvedLambdaParameterOperand(callBinding)) {
             return true;
         }
 
-        // Bind the parameter types of any lambda arguments from the sibling arguments before the
-        // regular input type strategy runs, so that the lambda body can be (re)validated with
+        // Bind the parameter types of any lambda arguments from the arguments preceding them before
+        // the regular input type strategy runs, so that the lambda body can be (re)validated with
         // concrete parameter types.
         bindLambdaArguments(callBinding, callContext, typeInference);
 
@@ -385,9 +392,10 @@ public final class TypeInferenceOperandChecker
 
     /**
      * Binds the lambda parameter types of a higher-order function's lambda arguments (declared via
-     * a {@link org.apache.flink.table.types.inference.LambdaInputTypeStrategy}) from the sibling
-     * arguments and re-validates the lambda bodies accordingly. Mirrors the built-in array
-     * higher-order function operand checkers for user-defined functions.
+     * a {@link org.apache.flink.table.types.inference.LambdaInputTypeStrategy}) from the arguments
+     * preceding them and re-validates the lambda bodies accordingly. Follows Calcite's lambda
+     * operand checkers ({@code OperandTypes.LambdaRelOperandTypeChecker}), but takes the parameter
+     * types from the function's type inference. Only built-in functions accept lambda arguments.
      */
     static void bindLambdaArguments(
             SqlCallBinding callBinding, CallContext callContext, TypeInference typeInference) {
@@ -453,13 +461,17 @@ public final class TypeInferenceOperandChecker
                 continue;
             }
             final SqlLambda lambda = (SqlLambda) operand;
+            // The call context describes every operand, but the contract of
+            // getExpectedLambdaParameterTypes only guarantees the ones preceding the lambda,
+            // because the Table API resolves arguments from left to right. A strategy must not read
+            // the later ones even though they are available here.
             final List<DataType> parameterTypes =
                     lambdaStrategy.getExpectedLambdaParameterTypes(callContext, pos).orElse(null);
             // Without expected parameter types the lambda parameters stay unbound and anything
             // derived from them remains a plain ANY, which would later fail deep inside type
             // inference. Report the cause instead.
             if (parameterTypes == null) {
-                // The lambda is not necessarily at fault: a sibling argument of the wrong type
+                // The lambda is not necessarily at fault: a preceding argument of the wrong type
                 // leaves nothing to derive from. Report the call, not the lambda.
                 throw new LambdaBindingException(
                         String.format(
@@ -524,15 +536,16 @@ public final class TypeInferenceOperandChecker
     }
 
     /**
-     * Gives a {@link RefinableLambdaInputTypeStrategy} its single feedback pass now that the body
-     * has been validated once, and re-validates the body against the refined parameter types.
+     * Gives a {@link RefinableLambdaInputTypeStrategy} feedback on the validated body and
+     * re-validates the body against the refined parameter types, until the strategy keeps them.
      *
      * <p>This is the SQL-side counterpart of the refinement the expression resolver performs on the
      * Table API path, so a call that reaches the shared strategy from either surface ends up with
      * the same lambda parameter types. {@code ARRAY_REDUCE} is the only user: its accumulator
-     * parameter has to become nullable once the reducer body is found to be nullable, because an
-     * iteration that produces {@code NULL} carries it into the next one. The pass is monotonic and
-     * therefore applied exactly once.
+     * parameter is widened when the reducer body does not fit it, and becomes nullable once the
+     * reducer body is found to be nullable, because an iteration that produces {@code NULL} carries
+     * it into the next one. The refinement is monotonic and bounded by {@link
+     * RefinableLambdaInputTypeStrategy#MAX_PARAMETER_TYPE_ADJUSTMENTS}.
      */
     private static void refineLambdaParameterTypes(
             SqlValidator validator,
@@ -546,16 +559,44 @@ public final class TypeInferenceOperandChecker
         if (!(lambdaStrategy instanceof RefinableLambdaInputTypeStrategy)) {
             return;
         }
-        final DataType bodyDataType = validatedLambdaResultType(validator, lambda);
-        // An unresolved body carries no information to refine from. It is re-checked in a later
-        // validation pass, once the enclosing lambda parameter it closes over has been bound.
-        if (bodyDataType == null) {
-            return;
+        final RefinableLambdaInputTypeStrategy refinableStrategy =
+                (RefinableLambdaInputTypeStrategy) lambdaStrategy;
+        List<DataType> currentTypes = parameterTypes;
+        for (int adjustments = 0; ; adjustments++) {
+            final DataType bodyDataType = validatedLambdaResultType(validator, lambda);
+            // An unresolved body carries no information to refine from. It is re-checked in a
+            // later validation pass, once the enclosing lambda parameter it closes over has been
+            // bound.
+            if (bodyDataType == null) {
+                return;
+            }
+            final Optional<List<DataType>> refined =
+                    refinableStrategy.adjustLambdaParameterTypes(
+                            callContext, argumentPos, currentTypes, bodyDataType);
+            if (!refined.isPresent()) {
+                return;
+            }
+            // Checked before the body is re-bound, which would otherwise fail with an index error
+            // for too few types and silently ignore surplus ones.
+            if (refined.get().size() != currentTypes.size()) {
+                throw new LambdaBindingException(
+                        LambdaTypeValidation.refinedParameterCountError(
+                                callContext.getName(),
+                                argumentPos,
+                                currentTypes.size(),
+                                refined.get().size()));
+            }
+            if (adjustments == RefinableLambdaInputTypeStrategy.MAX_PARAMETER_TYPE_ADJUSTMENTS) {
+                throw new TableException(
+                        String.format(
+                                "The lambda parameter types at position %d did not reach a fixed "
+                                        + "point after %d adjustments. This is a bug, please file "
+                                        + "an issue.",
+                                argumentPos, adjustments));
+            }
+            currentTypes = refined.get();
+            bindAndValidate(validator, typeFactory, scope, lambda, currentTypes);
         }
-        ((RefinableLambdaInputTypeStrategy) lambdaStrategy)
-                .adjustLambdaParameterTypes(callContext, argumentPos, parameterTypes, bodyDataType)
-                .ifPresent(
-                        refined -> bindAndValidate(validator, typeFactory, scope, lambda, refined));
     }
 
     /**
@@ -640,8 +681,8 @@ public final class TypeInferenceOperandChecker
 
     /**
      * Visitor that clears the previously validated types of a lambda body so that it can be
-     * re-validated after its parameter types have been bound. Mirrors the equivalent helper used by
-     * the built-in array higher-order function operand checkers.
+     * re-validated after its parameter types have been bound. Copied from Calcite's {@code
+     * OperandTypes.LambdaOperandTypeChecker.TypeRemover}, which is not accessible.
      */
     private static class TypeRemover extends SqlBasicVisitor<Void> {
         private final SqlValidator validator;
@@ -670,7 +711,7 @@ public final class TypeInferenceOperandChecker
      * of enriching it with the expected and actual signatures.
      *
      * <p>When {@link #reportWithCallSignature} is set, the cause is not the lambda itself but the
-     * call as a whole -- typically a sibling argument of the wrong type, from which no parameter
+     * call as a whole -- typically a preceding argument of the wrong type, from which no parameter
      * type can be derived. Blaming the lambda would then misdiagnose the error, so the call is
      * reported with its signature instead. Calcite renders that signature from the validator, which
      * can describe an unbound lambda as {@code FUNCTION(ANY) -> ...} where the call context cannot.
