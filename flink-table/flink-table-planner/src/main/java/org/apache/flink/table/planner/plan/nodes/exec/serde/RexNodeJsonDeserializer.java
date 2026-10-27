@@ -391,7 +391,8 @@ final class RexNodeJsonDeserializer extends StdDeserializer<RexNode> {
             parameters.add((RexLambdaRef) deserialize(parameterNode, serdeContext));
         }
         final RexNode expression = deserialize(jsonNode.get(FIELD_NAME_EXPR), serdeContext);
-        // The FUNCTION type is recomputed from the parameter and body types by RexBuilder.
+        // A RexLambda's type is its body's type. The FUNCTION type of a lambda operand is not part
+        // of the Rex tree; OperatorBindingCallContext derives it from the parameters when needed.
         final RexLambda lambda =
                 (RexLambda) serdeContext.getRexBuilder().makeLambdaCall(expression, parameters);
         validateLambda(lambda);

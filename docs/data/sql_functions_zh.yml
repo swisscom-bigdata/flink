@@ -1132,7 +1132,7 @@ higherorder:
 
       如果 `array` 为 `NULL`，则返回 `NULL`。空数组返回空数组。`NULL` 元素会和其它元素一样传给 lambda。
 
-      例如，`ARRAY_TRANSFORM(ARRAY[1, 2, 3], x -> x * 10)` 返回 `[10, 20, 30]`；`ARRAY_TRANSFORM(ARRAY[1, 2], x -> x + offset)` 会把列 `offset` 的值加到每个元素上。
+      例如，`ARRAY_TRANSFORM(ARRAY[1, 2, 3], x -> x * 10)` 返回 `[10, 20, 30]`；`ARRAY_TRANSFORM(ARRAY[1, 2], x -> x + base)` 会把列 `base` 的值加到每个元素上。
   - sql: ARRAY_FILTER(array, element -> predicate)
     table: array.arrayFilter(element -> predicate)
     description: |
@@ -1144,13 +1144,13 @@ higherorder:
   - sql: ARRAY_REDUCE(array, initial_value, (acc, element) -> expression)
     table: array.arrayReduce(initialValue, (acc, element) -> expression)
     description: |
-      对 `array` 做左折叠，即 `(ARRAY<E>, A, (A, E) -> A)` 返回 `A`。从 `initial_value` 开始，按顺序对每个元素应用合并 lambda，并返回最终的累加器。lambda 的第一个参数是累加器（其类型 `A` 取自 `initial_value`），第二个参数是元素；lambda 的结果会成为下一个元素的累加器。该调用的结果类型就是累加器类型 `A`。
+      对 `array` 做左折叠，即 `(ARRAY<E>, A, (A, E) -> A)` 返回 `A`。从 `initial_value` 开始，按顺序对每个元素应用合并 lambda，并返回最终的累加器。lambda 的第一个参数是类型为 `A` 的累加器，第二个参数是元素；lambda 的结果会成为下一个元素的累加器。该调用的结果类型就是累加器类型 `A`。
 
-      lambda 的函数体必须可以赋值给 `A`：允许隐式放宽（例如 `INT` 到 `BIGINT`），但不兼容或者会收窄的结果类型会导致校验错误。如果 `array`、`initial_value` 或 lambda 的函数体可为 `NULL`，则结果可为 `NULL`。当 lambda 的函数体可能产生 `NULL` 时，累加器会被推导为可为 `NULL`，因此根据 `acc IS NULL` 分支的合并 lambda 会观察到前面某次迭代把累加器置为 `NULL` 的结果。
+      如果 lambda 的结果可以赋值给 `initial_value` 的类型，则 `A` 就是该类型；允许隐式放宽（例如 `INT` 到 `BIGINT`）。否则，累加器会在同一类型族内无损地放宽一次，以便容纳该结果：字符串放宽为 `STRING`，二进制串放宽为 `BYTES`，小数放宽为 `DECIMAL(38, s)`（整数类型的 `initial_value` 与小数结果同样如此），其他类型放宽为两者的公共类型，数组和行等构造类型则按元素和字段逐一放宽。随后 `initial_value` 会被转换为该类型。如果结果仍然无法容纳，例如它属于另一个类型族（`INT` 累加器与 `DOUBLE` 结果），或者小数结果会丢失小数位，则校验失败，并提示应当对哪个值进行 CAST。如果 `array`、`initial_value` 或 lambda 的函数体可为 `NULL`，则结果可为 `NULL`。当 lambda 的函数体可能产生 `NULL` 时，累加器会被推导为可为 `NULL`，因此根据 `acc IS NULL` 分支的合并 lambda 会观察到前面某次迭代把累加器置为 `NULL` 的结果。
 
       如果 `array` 为 `NULL`，则返回 `NULL`。对于空数组，返回初始累加器。`NULL` 元素会传给合并 lambda。
 
-      例如，`ARRAY_REDUCE(ARRAY[1, 2, 3], 0, (acc, x) -> acc + x)` 返回 `6`；`ARRAY_REDUCE(ARRAY['a', 'b', 'c'], '', (acc, x) -> acc || x)` 返回 `'abc'`。
+      例如，`ARRAY_REDUCE(ARRAY[1, 2, 3], 0, (acc, x) -> acc + x)` 返回 `6`；`ARRAY_REDUCE(ARRAY['a', 'b', 'c'], '', (acc, x) -> acc || x)` 返回 `STRING` 类型的 `'abc'`；`ARRAY_REDUCE(ARRAY[1.25, 2.50], 0, (acc, x) -> acc + x)` 返回 `DECIMAL(38, 2)` 类型的 `3.75`。
   - sql: ARRAY_ZIP_WITH(array1, array2, (element1, element2) -> expression)
     table: array1.arrayZipWith(array2, (element1, element2) -> expression)
     description: |

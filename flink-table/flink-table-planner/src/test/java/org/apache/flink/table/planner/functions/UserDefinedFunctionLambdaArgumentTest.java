@@ -18,6 +18,9 @@
 
 package org.apache.flink.table.planner.functions;
 
+import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.ArgumentTrait;
+import org.apache.flink.table.annotation.DataTypeHint;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
@@ -26,6 +29,7 @@ import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
 import org.apache.flink.table.functions.AggregateFunction;
 import org.apache.flink.table.functions.FunctionDefinition;
+import org.apache.flink.table.functions.ProcessTableFunction;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.types.DataType;
@@ -38,16 +42,22 @@ import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.inference.TypeStrategies;
 import org.apache.flink.types.Row;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
+import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
 import static org.apache.flink.table.api.Expressions.$;
 import static org.apache.flink.table.api.Expressions.call;
+import static org.apache.flink.table.api.Expressions.nullOf;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -89,6 +99,72 @@ class UserDefinedFunctionLambdaArgumentTest {
                                                                 $("x").plus(1)))))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining(EXPECTED_MESSAGE);
+    }
+
+    static Stream<Arguments> functionTypedStaticArguments() {
+        final String rootMessage =
+                "for argument 'f'. Lambda arguments are currently only supported by built-in "
+                        + "functions, which declare them in their input type strategy";
+        return Stream.of(
+                Arguments.of(
+                        FunctionTypedScalarFunction.class,
+                        "SELECT my_function(f0, NULL) FROM t",
+                        rootMessage),
+                Arguments.of(
+                        FunctionTypedScalarFunction.class,
+                        "SELECT my_function(f0, x -> x + 1) FROM t",
+                        rootMessage),
+                Arguments.of(
+                        OptionalFunctionTypedScalarFunction.class,
+                        "SELECT my_function(a => f0) FROM t",
+                        rootMessage),
+                Arguments.of(
+                        FunctionTypedProcessTableFunction.class,
+                        "SELECT * FROM my_function(r => TABLE t, f => NULL)",
+                        rootMessage),
+                Arguments.of(
+                        NestedFunctionTypedScalarFunction.class,
+                        "SELECT my_function(f0, NULL) FROM t",
+                        "for argument 'f'. The FUNCTION data type is a helper type for lambda "
+                                + "arguments of higher-order functions. It cannot be "
+                                + "materialized and must not be nested in another data type."));
+    }
+
+    /**
+     * A {@code FUNCTION} type in a static signature would otherwise let a NULL or a missing value
+     * reach code generation in place of a lambda.
+     */
+    @ParameterizedTest
+    @MethodSource("functionTypedStaticArguments")
+    void testFunctionTypedStaticArgumentIsRejected(
+            Class<? extends UserDefinedFunction> functionClass, String sql, String message) {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporaryView(
+                "t",
+                tEnv.fromValues(
+                        DataTypes.ROW(DataTypes.FIELD("f0", DataTypes.ARRAY(DataTypes.INT()))),
+                        Row.of((Object) new Integer[] {1, 2, 3})));
+
+        assertThatThrownBy(
+                        () -> {
+                            tEnv.createTemporarySystemFunction("my_function", functionClass);
+                            tEnv.sqlQuery(sql);
+                        })
+                .satisfies(anyCauseMatches(ValidationException.class, message));
+    }
+
+    @Test
+    void testFunctionTypedLiteralIsRejected() {
+        assertThatThrownBy(() -> nullOf(DataTypes.FUNCTION(1)))
+                .satisfies(
+                        anyCauseMatches(
+                                ValidationException.class,
+                                "for a literal. The FUNCTION data type is a helper type for "
+                                        + "lambda arguments of higher-order functions. It "
+                                        + "cannot be materialized, so pass a lambda expression "
+                                        + "instead."));
+        assertThatThrownBy(() -> nullOf(DataTypes.ARRAY(DataTypes.FUNCTION(1))))
+                .satisfies(anyCauseMatches(ValidationException.class, "for a literal."));
     }
 
     /** Declares {@code f(ARRAY<INT>, (INT) -> INT)}. */
@@ -136,6 +212,44 @@ class UserDefinedFunctionLambdaArgumentTest {
         public Integer[] eval(Integer[] array, Function<Integer, Integer> lambda) {
             return array;
         }
+    }
+
+    /** A scalar function with a {@code FUNCTION}-typed parameter in its static signature. */
+    public static class FunctionTypedScalarFunction extends ScalarFunction {
+        public Integer[] eval(
+                @ArgumentHint(name = "a") Integer[] array,
+                @ArgumentHint(name = "f", type = @DataTypeHint("FUNCTION(1)"))
+                        Function<Integer, Integer> lambda) {
+            return array;
+        }
+    }
+
+    /** A scalar function with an optional {@code FUNCTION}-typed parameter. */
+    public static class OptionalFunctionTypedScalarFunction extends ScalarFunction {
+        public Integer[] eval(
+                @ArgumentHint(name = "a") Integer[] array,
+                @ArgumentHint(name = "f", type = @DataTypeHint("FUNCTION(1)"), isOptional = true)
+                        Function<Integer, Integer> lambda) {
+            return array;
+        }
+    }
+
+    /** A scalar function with a {@code FUNCTION} type nested in a parameter type. */
+    public static class NestedFunctionTypedScalarFunction extends ScalarFunction {
+        public Integer[] eval(
+                @ArgumentHint(name = "a") Integer[] array,
+                @ArgumentHint(name = "f", type = @DataTypeHint("ARRAY<FUNCTION(1)>"))
+                        Object[] lambdas) {
+            return array;
+        }
+    }
+
+    /** A process table function with a {@code FUNCTION}-typed scalar argument. */
+    public static class FunctionTypedProcessTableFunction extends ProcessTableFunction<Integer> {
+        public void eval(
+                @ArgumentHint(value = ArgumentTrait.ROW_SEMANTIC_TABLE, name = "r") Row r,
+                @ArgumentHint(name = "f", type = @DataTypeHint("FUNCTION(1)"))
+                        Function<Integer, Integer> lambda) {}
     }
 
     /** An aggregate function that declares a lambda argument. */

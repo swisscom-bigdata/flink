@@ -99,7 +99,7 @@ public abstract class BuiltInScalarFunction extends ScalarFunction {
                         .outputTypeStrategy(TypeStrategies.explicit(getOutputDataType()));
         if (arguments.stream().anyMatch(t -> t.getLogicalType().is(LogicalTypeRoot.FUNCTION))) {
             // A static signature rejects lambda arguments because their parameter types have to be
-            // derived from a sibling argument rather than declared up front. That derivation has
+            // derived from a preceding argument rather than declared up front. That derivation has
             // already happened for a specialized function: the types below are the resolved ones of
             // this very call, so they are restated as an input type strategy instead. This also
             // carries the lambda argument's representation, which is what hands the function object

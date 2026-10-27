@@ -176,6 +176,7 @@ import org.apache.calcite.sql.util.SqlVisitor;
 import org.apache.calcite.sql.validate.AggregatingSelectScope;
 import org.apache.calcite.sql.validate.CollectNamespace;
 import org.apache.calcite.sql.validate.DelegatingScope;
+import org.apache.calcite.sql.validate.GroupByScope;
 import org.apache.calcite.sql.validate.ListScope;
 import org.apache.calcite.sql.validate.MatchRecognizeScope;
 import org.apache.calcite.sql.validate.MeasureScope;
@@ -265,21 +266,21 @@ import static org.apache.calcite.util.Util.transform;
  * <p>FLINK modifications are at lines
  *
  * <ol>
- *   <li>Added in FLINK-29081, FLINK-28682, FLINK-33395: Lines 711 ~ 728
- *   <li>Added in FLINK-24024: Lines 1516 ~ 1522
- *   <li>Added in FLINK-24024: Lines 1536 ~ 1575
- *   <li>Added in FLINK-37269: Lines 2340 ~ 2362
- *   <li>Added in FLINK-28682: Lines 2513 ~ 2530
- *   <li>Added in FLINK-28682: Lines 2567 ~ 2595
- *   <li>Added in FLINK-32474: Lines 2652 ~ 2654
- *   <li>Added in FLINK-32474: Lines 2658 ~ 2660
- *   <li>Added in FLINK-32474: Lines 2676 ~ 2678
- *   <li>Added in FLINK-32474: Lines 3119 ~ 3131
- *   <li>Added in FLINK-32474: Lines 3232 ~ 3266
- *   <li>Added in CALCITE-7589: Lines 3756 ~ 3781
- *   <li>Added in FLINK-39695: Lines 4880 ~ 4886, 4889 ~ 4893
- *   <li>Added in FLINK-39695: Lines 4899 ~ 4974
- *   <li>Added in FLINK-34312: Lines 6297 ~ 6308
+ *   <li>Added in FLINK-29081, FLINK-28682, FLINK-33395: Lines 726 ~ 743
+ *   <li>Added in FLINK-24024: Lines 1531 ~ 1537
+ *   <li>Added in FLINK-24024: Lines 1551 ~ 1590
+ *   <li>Added in FLINK-37269: Lines 2355 ~ 2377
+ *   <li>Added in FLINK-28682: Lines 2579 ~ 2596
+ *   <li>Added in FLINK-28682: Lines 2633 ~ 2661
+ *   <li>Added in FLINK-32474: Lines 2718 ~ 2720
+ *   <li>Added in FLINK-32474: Lines 2724 ~ 2726
+ *   <li>Added in FLINK-32474: Lines 2742 ~ 2744
+ *   <li>Added in FLINK-32474: Lines 3185 ~ 3197
+ *   <li>Added in FLINK-32474: Lines 3298 ~ 3332
+ *   <li>Added in CALCITE-7589: Lines 3891 ~ 3916
+ *   <li>Added in FLINK-39695: Lines 5015 ~ 5021, 5024 ~ 5028
+ *   <li>Added in FLINK-39695: Lines 5034 ~ 5109
+ *   <li>Added in FLINK-34312: Lines 6493 ~ 6504
  * </ol>
  *
  * <p>In official extension point (i.e. {@link #convertExtendedExpression(SqlNode, Blackboard)}):
@@ -292,12 +293,14 @@ import static org.apache.calcite.util.Util.transform;
  * blackboard so a lambda body can resolve outer columns and enclosing lambda parameters, assigning
  * nested lambda parameters distinct {@link RexLambdaRef} indices so free references remain
  * distinguishable, and {@link #getCorrelationUse} finishes correlation de-duplication inside lambda
- * bodies. CALCITE-6242 (fixVersion 1.43.0) covers part of this upstream -- inheriting the enclosing
- * {@code nameToNodeMap} in {@code convertLambda} and the fall-through in {@code
- * Blackboard#lookupExp} -- and those two blocks can be removed after upgrading Calcite to 1.43.0;
- * the rest is residual, and is marked as such at each block. None of it can be applied from a
- * subclass: {@code convertLambda} and {@code getCorrelationUse} are private and {@code
- * Blackboard#lookupExp} is only reachable from them.
+ * bodies. CALCITE-7497 (fixVersion 1.42.0) makes the {@link #getCorrelationUse} blocks unnecessary,
+ * so they can be removed after upgrading Calcite to 1.42.0. CALCITE-6242 (fixVersion 1.43.0) covers
+ * part of the rest upstream: the fall-through in {@code Blackboard#lookupExp}, whose block can be
+ * removed after upgrading Calcite to 1.43.0, and inheriting the enclosing {@code nameToNodeMap} in
+ * {@code convertLambda}, whose block then shrinks to the cumulative parameter indices. The rest is
+ * residual, and is marked as such at each block. None of it can be applied from a subclass: {@code
+ * convertLambda} and {@code getCorrelationUse} are private and {@code Blackboard#lookupExp} is only
+ * reachable from them.
  */
 @Value.Enclosing
 public class SqlToRelConverter {
@@ -3548,13 +3551,14 @@ public class SqlToRelConverter {
                             rexBuilder, correlNames.get(0), Util.skip(correlNames), r0);
             // ----- FLINK MODIFICATION BEGIN -----
             // DeduplicateCorrelateVariables rewrites correlation references with an ordinary
-            // RexShuttle, which does not descend into RexLambda bodies (Calcite 1.41). A correlated
-            // reference captured inside a lambda (FLINK-31207 higher-order functions and lambdas)
-            // is
-            // therefore left pointing at a secondary correlation variable, which would leak an
-            // undefined correlation into the plan. Finish the de-duplication inside lambda bodies
-            // by
-            // remapping every secondary correlation variable to the primary one.
+            // RexShuttle, which in Calcite 1.41 visits a RexLambda body but discards the rewritten
+            // node. A correlated reference captured inside a lambda (FLINK-31207 higher-order
+            // functions and lambdas) is therefore left pointing at a secondary correlation
+            // variable, which would leak an undefined correlation into the plan. Finish the
+            // de-duplication inside lambda bodies by remapping every secondary correlation
+            // variable to the primary one.
+            // Fixed upstream by CALCITE-7497 (fixVersion 1.42.0); remove this block, together with
+            // deduplicateCorrelateVariablesInLambdas, on the 1.42.0 upgrade.
             r =
                     deduplicateCorrelateVariablesInLambdas(
                             r, correlNames.get(0), Util.skip(correlNames));
@@ -3583,12 +3587,12 @@ public class SqlToRelConverter {
      * Remaps every reference to one of {@code secondaryIds} to {@code primaryId} inside {@link
      * RexLambda} bodies throughout {@code rel}. This completes what {@link
      * DeduplicateCorrelateVariables} performs outside lambda bodies but cannot perform inside them,
-     * because its {@link RexShuttle} does not descend into a {@link RexLambda} (Calcite 1.41). See
-     * {@link #getCorrelationUse}. This is a Flink extension for FLINK-31207 (higher-order functions
-     * and lambdas). Upstream status: CALCITE-6242 (fixVersion 1.43.0) does not help here -- it only
-     * makes {@code RexVisitorImpl} and {@code RexBiVisitorImpl} descend when {@code deep} -- but
-     * CALCITE-7497 (Closed/Fixed, fixVersion 1.42.0, commit fa951db4b900) rebuilds the lambda from
-     * the rewritten body in {@code RexShuttle#visitLambda} itself, which {@code
+     * because its {@link RexShuttle} discards a rewritten {@link RexLambda} body (Calcite 1.41).
+     * See {@link #getCorrelationUse}. This is a Flink extension for FLINK-31207 (higher-order
+     * functions and lambdas). Upstream status: CALCITE-6242 (fixVersion 1.43.0) does not help here
+     * -- it only makes {@code RexVisitorImpl} and {@code RexBiVisitorImpl} descend when {@code
+     * deep} -- but CALCITE-7497 (Closed/Fixed, fixVersion 1.42.0, commit fa951db4b900) rebuilds the
+     * lambda from the rewritten body in {@code RexShuttle#visitLambda} itself, which {@code
      * DeduplicateCorrelateVariables}'s shuttle then inherits. This method can therefore be removed
      * on the Calcite 1.42.0 upgrade. Until then it cannot live outside this file either, because
      * {@code DeduplicateCorrelateVariables}'s shuttle is a private static nested class and {@link
@@ -5889,8 +5893,8 @@ public class SqlToRelConverter {
             // A reference that crosses a SQL query boundary (e.g. a lambda body in a scalar
             // subquery referencing an outer query column) must NOT be flattened this way; it has to
             // keep Calcite's normal correlated DeferredLookup/RexCorrelVariable path. Only strip
-            // consecutive lambda scopes and check whether the resolved ancestor is the enclosing
-            // query block.
+            // consecutive lambda scopes and the clause scopes of the same SELECT, and check whether
+            // the resolved ancestor is the enclosing query block.
             //
             // Residual after CALCITE-6242 (fixVersion 1.43.0): upstream sets isParent = false for
             // *any* resolution from a lambda scope with inputs, which also swallows the
@@ -5966,11 +5970,16 @@ public class SqlToRelConverter {
          * Returns whether {@code ancestorScope} is the query block that directly encloses the
          * (possibly nested) lambda scope {@code scope}, i.e. the identifier was captured by
          * crossing only lambda scopes and not a SQL query boundary. Consecutive lambda scopes are
-         * stripped; the first non-lambda scope must be the resolved ancestor. This is a Flink
-         * extension for FLINK-31207 (higher-order functions and lambdas), and is residual after
-         * CALCITE-6242 (fixVersion 1.43.0), which unconditionally treats any resolution from a
-         * lambda scope as local and therefore drops the correlation of a lambda body that captures
-         * across a query boundary.
+         * stripped; the first non-lambda scope must then be the resolved ancestor, possibly reached
+         * through the clause scopes of the same SELECT. A lambda in the select list or HAVING of an
+         * aggregating query sits under its AggregatingSelectScope, one in GROUP BY under its
+         * GroupByScope, while the captured column resolves in the SelectScope that these delegate
+         * to; stepping through them never crosses a query boundary. A lambda in ORDER BY needs no
+         * step of its own: FlinkSqlLambdaScope already parents it to the scope below the
+         * OrderByScope. This is a Flink extension for FLINK-31207 (higher-order functions and
+         * lambdas), and is residual after CALCITE-6242 (fixVersion 1.43.0), which unconditionally
+         * treats any resolution from a lambda scope as local and therefore drops the correlation of
+         * a lambda body that captures across a query boundary.
          */
         private boolean isSameQueryLambdaCapture(
                 SqlValidatorScope scope, SqlValidatorScope ancestorScope) {
@@ -5978,6 +5987,11 @@ public class SqlToRelConverter {
             boolean crossedLambda = false;
             while (current instanceof SqlLambdaScope) {
                 crossedLambda = true;
+                current = ((DelegatingScope) current).getParent();
+            }
+            while (current != ancestorScope
+                    && (current instanceof AggregatingSelectScope
+                            || current instanceof GroupByScope)) {
                 current = ((DelegatingScope) current).getParent();
             }
             return crossedLambda && current == ancestorScope;

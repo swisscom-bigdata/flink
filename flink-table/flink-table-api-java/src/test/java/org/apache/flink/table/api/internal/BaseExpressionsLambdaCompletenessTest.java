@@ -20,11 +20,17 @@ package org.apache.flink.table.api.internal;
 
 import org.apache.flink.table.functions.LambdaBuiltInFunctions;
 import org.apache.flink.table.types.inference.LambdaInputTypeStrategy;
+import org.apache.flink.util.function.Function0;
+import org.apache.flink.util.function.Function1;
+import org.apache.flink.util.function.Function2;
+import org.apache.flink.util.function.Function3;
+import org.apache.flink.util.function.Function4;
 
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -41,17 +47,34 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class BaseExpressionsLambdaCompletenessTest {
 
+    /** The interfaces a typed Table API lambda is written as, one per supported arity. */
+    private static final Set<Class<?>> LAMBDA_TYPES =
+            new HashSet<>(
+                    Arrays.asList(
+                            Function0.class,
+                            Function1.class,
+                            Function2.class,
+                            Function3.class,
+                            Function4.class));
+
     /**
-     * A built-in function that declares a lambda argument must be callable from the Table API.
+     * A built-in function that declares a lambda argument must be callable from the Table API with
+     * a typed Java lambda.
      *
      * <p>The expected set is derived from whether the input type strategy is a {@link
      * LambdaInputTypeStrategy} rather than listed, so a new higher-order function is covered
-     * without extending this test.
+     * without extending this test. The matching method must take one of the {@code FunctionN}
+     * interfaces that represent a lambda, so a same-named method that only takes expressions does
+     * not count.
      */
     @Test
     void testLambdaFunctionsAreExposedOnBaseExpressions() {
         final Set<String> methodNames =
                 Arrays.stream(BaseExpressions.class.getMethods())
+                        .filter(
+                                method ->
+                                        Arrays.stream(method.getParameterTypes())
+                                                .anyMatch(LAMBDA_TYPES::contains))
                         .map(Method::getName)
                         .collect(Collectors.toSet());
 
@@ -63,7 +86,9 @@ class BaseExpressionsLambdaCompletenessTest {
         assertThat(missing)
                 .as(
                         "Every built-in function that declares a lambda argument needs a "
-                                + "BaseExpressions method so that it can be called from the Table API.")
+                                + "BaseExpressions method of the same name that takes a typed "
+                                + "lambda (Function0 to Function4), so that it can be called from "
+                                + "the Table API.")
                 .isEmpty();
     }
 

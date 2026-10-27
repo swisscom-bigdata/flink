@@ -35,6 +35,10 @@ import java.util.List;
  * have a runtime representation. Nothing validates the arity a {@link LambdaInputTypeStrategy}
  * derives on its behalf, so both surfaces must apply this check right after {@link
  * LambdaInputTypeStrategy#getExpectedLambdaParameterTypes} returned.
+ *
+ * <p>Likewise, both surfaces must check that the parameter types a {@link
+ * RefinableLambdaInputTypeStrategy} refines keep the arity of the lambda, before they re-resolve
+ * the lambda body with them.
  */
 @Internal
 public final class LambdaTypeValidation {
@@ -75,6 +79,39 @@ public final class LambdaTypeValidation {
                 FunctionType.MAX_CONVERTIBLE_PARAMETER_COUNT,
                 parameterCount,
                 RUNTIME_REPRESENTATION_HINT);
+    }
+
+    /**
+     * Validates the parameter types that a {@link RefinableLambdaInputTypeStrategy} refined for a
+     * call.
+     *
+     * @throws ValidationException if the refined types differ in number from the current ones
+     */
+    public static void checkRefinedParameterTypes(
+            String functionName,
+            int argumentPos,
+            List<DataType> currentParameterTypes,
+            List<DataType> refinedParameterTypes) {
+        if (refinedParameterTypes.size() != currentParameterTypes.size()) {
+            throw new ValidationException(
+                    refinedParameterCountError(
+                            functionName,
+                            argumentPos,
+                            currentParameterTypes.size(),
+                            refinedParameterTypes.size()));
+        }
+    }
+
+    /**
+     * The message of {@link #checkRefinedParameterTypes} for call sites that need to wrap it into
+     * their own exception type.
+     */
+    public static String refinedParameterCountError(
+            String functionName, int argumentPos, int expectedCount, int actualCount) {
+        return String.format(
+                "Invalid input type strategy of function '%s'. The refined lambda parameter types "
+                        + "at position %d must have %d parameter(s) but %d were returned.",
+                functionName, argumentPos, expectedCount, actualCount);
     }
 
     private LambdaTypeValidation() {

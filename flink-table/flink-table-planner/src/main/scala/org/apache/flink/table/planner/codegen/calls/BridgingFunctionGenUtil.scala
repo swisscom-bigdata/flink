@@ -42,6 +42,7 @@ import org.apache.flink.table.runtime.collector.WrappingCollector
 import org.apache.flink.table.runtime.functions.{DefaultExpressionEvaluator, LambdaFunctionFactory}
 import org.apache.flink.table.runtime.generated.GeneratedFunction
 import org.apache.flink.table.runtime.operators.correlate.async.DelegatingAsyncTableResultFuture
+import org.apache.flink.table.runtime.operators.metrics.UdfMetrics
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.extraction.ExtractionUtils.primitiveToWrapper
 import org.apache.flink.table.types.inference.{CallContext, LambdaInfo, RefinableLambdaInputTypeStrategy, TypeInference, TypeInferenceUtil}
@@ -51,6 +52,7 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeCasts.supportsAvoid
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.isCompositeType
 import org.apache.flink.table.types.utils.DataTypeUtils
 import org.apache.flink.table.types.utils.DataTypeUtils.{isInternal, validateInputDataType, validateOutputDataType}
+import org.apache.flink.table.utils.EncodingUtils
 import org.apache.flink.util.Preconditions
 
 import org.apache.calcite.rex.{RexCall, RexCallBinding, RexProgram}
@@ -59,6 +61,7 @@ import java.util.Collections
 import java.util.concurrent.CompletableFuture
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 /**
  * Helps in generating a call to a user-defined [[ScalarFunction]], [[TableFunction]],
@@ -158,7 +161,8 @@ object BridgingFunctionGenUtil {
       dataTypeFactory,
       definition,
       RexCallBinding.create(function.getTypeFactory, call, rexProgram, Collections.emptyList()),
-      call.getType)
+      call.getType,
+      /* lambdaBodiesAvailable */ true)
 
     val udf = UserDefinedFunctionHelper.createSpecializedFunction(
       function.getName,
@@ -217,11 +221,12 @@ object BridgingFunctionGenUtil {
     val enrichedArgumentDataTypes = toScala(castCallContext.getArgumentDataTypes)
 
     // A lambda argument (FUNCTION type) of a higher-order function is passed to eval() as a
-    // first-class function object (java.util.function.Function / BiFunction) that wraps the compiled
-    // lambda body (see generateLambdaFunctionObject). All other operands are passed through as usual.
-    // The FUNCTION type of a lifted lambda already excludes the lifted capture parameters (see
-    // OperatorBindingCallContext#lambdaDataType), so it carries the user-visible arity and thus the
-    // eval() parameter class Function / BiFunction / TriFunction.
+    // first-class function object that implements the argument's conversion class (a FunctionN, an
+    // accepted alias, or a FunctionDataN; see FunctionType) and wraps the compiled lambda body (see
+    // generateLambdaFunctionObject). All other operands are passed through as usual. The FUNCTION
+    // type of a lifted lambda already excludes the lifted capture parameters (see
+    // OperatorBindingCallContext#lambdaDataType), so it carries the user-visible arity, which
+    // selects the conversion class.
     //
     // A call may carry more than one lambda argument. The trailing capture operands are then the
     // concatenation, in left-to-right operand order, of each lambda's own captures. A lambda's
@@ -767,9 +772,9 @@ object BridgingFunctionGenUtil {
 
   /**
    * Generates the first-class function object passed to a user-defined higher-order function for a
-   * lambda (FUNCTION-typed) argument: a [[java.util.function.Function]] for a one-parameter lambda,
-   * a [[java.util.function.BiFunction]] for a two-parameter lambda, or an
-   * [[org.apache.flink.util.function.TriFunction]] for a three-parameter lambda. The lambda body is
+   * lambda (FUNCTION-typed) argument. The object implements the argument's conversion class: the
+   * `FunctionN` matching the lambda's parameter count by default, an accepted alias such as
+   * [[java.util.function.Function]], or a `FunctionDataN` over internal data. The lambda body is
    * compiled into an [[ExpressionEvaluator]] that is opened once in the operator and doubles as the
    * factory for these objects; the generated object casts its arguments to the lambda parameters'
    * external classes and calls the compiled body directly.
@@ -844,7 +849,7 @@ object BridgingFunctionGenUtil {
     val interfaceClass = typeTerm(lambdaSpec.interfaceClass)
 
     // compile the lambda body into an evaluator and open it in the operator
-    val evaluator = evaluatorFactory match {
+    val (evaluator, bodyUdfMetrics) = evaluatorFactory match {
       case defaultFactory: DefaultExpressionEvaluatorFactory =>
         defaultFactory.createLambdaEvaluator(body, returnDataType, lambdaSpec, allParamFields)
       case _ =>
@@ -859,10 +864,16 @@ object BridgingFunctionGenUtil {
         classOf[DefaultExpressionEvaluator].getCanonicalName)
     val factoryTerm = newName(ctx, "lambdaFactory")
     ctx.addReusableMember(s"private transient ${className[LambdaFunctionFactory]} $factoryTerm;")
-    // A lambda may itself be nested in another lambda body; the enclosing generated class is then an
-    // expression evaluator without a runtime context, which supplies a context of its own.
+    // A function called from the body is opened with the enclosing generated class's context and
+    // feeds that class's metrics handles, like one called outside a lambda. A lambda may itself be
+    // nested in another lambda body; the enclosing generated class is then an expression evaluator,
+    // which passes on what it was opened with.
+    val udfMetricsTerms = bodyUdfMetrics.map {
+      case (udfName, sampleInterval) => ctx.addReusableUdfMetrics(udfName, sampleInterval)
+    }
     ctx.addReusableOpenStatement(
-      s"$factoryTerm = $evaluatorTerm.openLambdaFactory(${ctx.functionContextCode()});")
+      s"$factoryTerm = $evaluatorTerm.openLambdaFactory(${ctx.functionContextCode()}, " +
+        s"new ${className[UdfMetrics]}[] {${udfMetricsTerms.mkString(", ")}});")
     // The framework owns the evaluator's lifecycle: it is closed with the enclosing generated class
     // so that a function called from the lambda body is closed like anywhere else.
     ctx.addReusableCloseStatement(s"$evaluatorTerm.close();")
@@ -1048,7 +1059,7 @@ object BridgingFunctionGenUtil {
         expression: Expression,
         outputDataType: DataType,
         args: DataTypes.Field*): ExpressionEvaluator = {
-      createEvaluator(expression, outputDataType, None, args)
+      createEvaluator(expression, outputDataType, None, args)._1
     }
 
     /**
@@ -1058,21 +1069,24 @@ object BridgingFunctionGenUtil {
      *
      * `args` covers the lambda's user-visible parameters followed by its lifted captures; the
      * function object exposes only the leading `spec.userParamCount` fields.
+     *
+     * Also returns the user-defined functions (name and sample interval) whose metrics handles the
+     * enclosing generated class has to pass to [[DefaultExpressionEvaluator.openLambdaFactory]], in
+     * that order.
      */
     def createLambdaEvaluator(
         expression: Expression,
         outputDataType: DataType,
         spec: LambdaFactorySpec,
-        args: Seq[DataTypes.Field]): DefaultExpressionEvaluator = {
+        args: Seq[DataTypes.Field]): (DefaultExpressionEvaluator, Seq[(String, Int)]) = {
       createEvaluator(expression, outputDataType, Some(spec), args)
-        .asInstanceOf[DefaultExpressionEvaluator]
     }
 
     private def createEvaluator(
         expression: Expression,
         outputDataType: DataType,
         lambdaSpec: Option[LambdaFactorySpec],
-        args: Seq[DataTypes.Field]): ExpressionEvaluator = {
+        args: Seq[DataTypes.Field]): (DefaultExpressionEvaluator, Seq[(String, Int)]) = {
       args.foreach(f => validateInputDataType(f.getDataType))
       validateOutputDataType(outputDataType)
 
@@ -1143,7 +1157,7 @@ object BridgingFunctionGenUtil {
         expression: Expression,
         outputDataType: DataType,
         lambdaSpec: Option[LambdaFactorySpec],
-        args: Seq[DataTypes.Field]): ExpressionEvaluator = {
+        args: Seq[DataTypes.Field]): (DefaultExpressionEvaluator, Seq[(String, Int)]) = {
       val argFields = args.map(f => new RowField(f.getName, f.getDataType.getLogicalType))
       val outputType = outputDataType.getLogicalType
 
@@ -1255,11 +1269,12 @@ object BridgingFunctionGenUtil {
         evaluatorCode,
         ctx.references.toArray,
         ctx.tableConfig)
-      new DefaultExpressionEvaluator(
+      val evaluator = new DefaultExpressionEvaluator(
         genClass,
         externalResultClass,
         externalArgClasses.toArray,
         rexNode.toString)
+      (evaluator, ctx.udfMetricsRequests)
     }
 
     /**
@@ -1339,19 +1354,40 @@ object BridgingFunctionGenUtil {
       super.addReusableConverter(dataType, "this.getClass().getClassLoader()")
     }
 
-    override def addReusableFunction(
-        function: UserDefinedFunction,
-        functionContextClass: Class[_ <: FunctionContext] = classOf[FunctionContext],
-        contextArgs: Seq[String] = null): String = {
-      super.addReusableFunction(
-        function,
-        classOf[FunctionContext],
-        Seq("null, this.getClass().getClassLoader()", "null"))
+    // An evaluator is not an operator and thus has no runtime context of its own. It passes on the
+    // context that the enclosing generated class opened it with.
+    override def functionContextCode(): String =
+      s"${className[DefaultExpressionEvaluator]}.functionContextOf(" +
+        "openContext, this.getClass().getClassLoader())"
+
+    private val requestedUdfMetrics = mutable.LinkedHashMap[String, (Int, String)]()
+
+    /**
+     * Takes the handle over from the enclosing generated class rather than registering one, see
+     * [[DefaultExpressionEvaluator.udfMetricsOf]]. The enclosing class passes its handles in the
+     * order of [[udfMetricsRequests]].
+     */
+    override def addReusableUdfMetrics(udfName: String, sampleInterval: Int): String = {
+      requestedUdfMetrics
+        .getOrElseUpdate(
+          udfName, {
+            val index = requestedUdfMetrics.size
+            val fieldTerm = newName(this, "udfMetrics")
+            addReusableMember(s"private transient ${className[UdfMetrics]} $fieldTerm;")
+            addReusableOpenStatement(
+              s"$fieldTerm = ${className[DefaultExpressionEvaluator]}.udfMetricsOf(" +
+                s"""openContext, $index, "${EncodingUtils.escapeJava(udfName)}", """ +
+                s"$sampleInterval);")
+            (sampleInterval, fieldTerm)
+          }
+        )
+        ._2
     }
 
-    // An evaluator is not an operator and thus has no runtime context.
-    override def functionContextCode(): String =
-      s"new ${classOf[FunctionContext].getCanonicalName}(" +
-        "null, this.getClass().getClassLoader(), null)"
+    /** The user-defined functions whose metrics handles this evaluator requested, in order. */
+    def udfMetricsRequests: Seq[(String, Int)] =
+      requestedUdfMetrics.map {
+        case (udfName, (sampleInterval, _)) => (udfName, sampleInterval)
+      }.toSeq
   }
 }

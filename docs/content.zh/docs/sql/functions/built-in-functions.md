@@ -72,8 +72,7 @@ Flink Table API & SQL 为用户提供了一组内置的数据转换函数。本�
 
 ### 高阶函数
 
-高阶函数（higher-order function）接收一个 *lambda 表达式* 作为参数，并把它应用到 `ARRAY` 的元素或
-`MAP` 的键值对上。
+高阶函数（higher-order function）接收一个 *lambda 表达式* 作为参数，并把它应用到 `ARRAY` 的元素上。
 
 lambda 是一个匿名函数，写作 `parameter -> body`（多个参数时写作 `(parameter1, parameter2) -> body`）。
 它的参数类型由所应用的集合推导得出，因此无需声明：
@@ -112,11 +111,22 @@ SELECT ARRAY_TRANSFORM(vals, x -> x + (SELECT MAX(base) FROM t)) FROM t;
 
 但这些构造不能作用于 lambda 的*参数*：参数是单个元素而不是一组行，因此
 `ARRAY_TRANSFORM(vals, x -> SUM(x))` 会导致校验错误。若要折叠数组自身的元素，请使用 `ARRAY_REDUCE`。
+在函数体的子查询中，与 lambda 参数同名的非限定名称始终引用该参数，即使子查询自身有同名列也是如此；
+请用表别名限定子查询自身的列（例如 `q.x`），或重命名参数。
 表函数同样不能出现在函数体中，因为它产生的是行而不是值；异步标量函数也不能，因为它的结果在函数体求值完成之后才会返回。
 Table API 遵循相同的规则（它没有子查询表达式）。
 
-lambda 只能作为高阶函数的参数使用，用在其它位置会导致校验错误。lambda 不是值：它不能存储在列中，
-不能赋值给变量，也不能作为查询结果返回。
+在 `ORDER BY` 中，函数体看到的是 `FROM` 子句的列，而不是 select 列表的别名。如果函数体中的某个名称是
+select 列表中的别名，且该别名代表的不是同名的列本身，则会导致校验错误；请改写为别名对应的表达式，
+或用表别名限定该列（例如 `t.base`）。
+
+由 `USING` 或 `NATURAL` 连接合并的列在函数体中必须加以限定，即使函数体位于 select 列表中也是如此（在 select
+列表中、函数体之外，该列可以不加限定）。不加限定时会报告该列有歧义。请使用所需那一侧的列（例如 `t1.base`），`FULL` 连接后则使用
+`COALESCE(t1.base, t2.base)`。
+
+lambda 只能作为高阶函数的参数使用。在 SQL 中，lambda 出现在函数参数以外的位置会导致解析错误；
+传给在该参数位置不接受 lambda 的函数则会导致校验错误。在 Table API 中，这两种情况都会导致校验错误。
+lambda 不是值：它不能存储在列中，不能赋值给变量，也不能作为查询结果返回。
 
 在 Table API 中，这些函数以表达式方法的形式提供，接收宿主语言的 lambda。该 lambda 接收 lambda 参数对应的
 表达式，并返回函数体表达式：

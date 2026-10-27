@@ -2105,6 +2105,7 @@ public class RelDecorrelator implements ReflectiveVisitor {
         private final Map<RelNode, Frame> map;
         private final CorelMap cm;
         // ----- FLINK MODIFICATION BEGIN -----
+        // Used only by visitLambda below; remove with it on the Calcite 1.42.0 upgrade.
         private final RexBuilder rexBuilder;
 
         // ----- FLINK MODIFICATION END -----
@@ -2114,6 +2115,7 @@ public class RelDecorrelator implements ReflectiveVisitor {
             this.map = requireNonNull(map, "map");
             this.cm = requireNonNull(cm, "cm");
             // ----- FLINK MODIFICATION BEGIN -----
+            // Remove with visitLambda below on the Calcite 1.42.0 upgrade.
             this.rexBuilder = currentRel.getCluster().getRexBuilder();
             // ----- FLINK MODIFICATION END -----
         }
@@ -2347,9 +2349,10 @@ public class RelDecorrelator implements ReflectiveVisitor {
                 // A higher-order-function call carries a lambda operand. Its return type is
                 // invariant under decorrelation (a correlated reference captured inside the lambda
                 // is replaced by an equivalently-typed input reference), and re-deriving it from
-                // the
-                // rewritten lambda operand can fail and yield ANY. Preserve the original type
+                // the rewritten lambda operand can fail and yield ANY. Preserve the original type
                 // (FLINK-31207 higher-order functions and lambdas).
+                // Not covered by CALCITE-6242 or CALCITE-7497: upstream still re-derives the type,
+                // so this block survives the Calcite 1.42.0 and 1.43.0 upgrades.
                 boolean hasLambdaOperand = false;
                 for (RexNode operand : call.operands) {
                     if (operand instanceof RexLambda) {
@@ -2357,10 +2360,18 @@ public class RelDecorrelator implements ReflectiveVisitor {
                         break;
                     }
                 }
-                // ----- FLINK MODIFICATION END -----
 
                 final RelDataType newType;
-                if (isSpecialCast || hasLambdaOperand) {
+                if (!isSpecialCast && !hasLambdaOperand) {
+                    // ----- FLINK MODIFICATION END -----
+                    // TODO: ideally this only needs to be called if the result
+                    // type will also change. However, since that requires
+                    // support from type inference rules to tell whether a rule
+                    // decides return type based on input types, for now all
+                    // operators will be recreated with new type if any operand
+                    // changed, unless the operator has "built-in" type.
+                    newType = rexBuilder.deriveReturnType(operator, clonedOperands);
+                } else {
                     // Use the current return type when creating a new call, for
                     // operators with return type built into the operator
                     // definition, and with no type inference rules, such as
@@ -2370,14 +2381,6 @@ public class RelDecorrelator implements ReflectiveVisitor {
                     // types in this category. Need to resolve those together
                     // and preferably in the base class RexShuttle.
                     newType = call.getType();
-                } else {
-                    // TODO: ideally this only needs to be called if the result
-                    // type will also change. However, since that requires
-                    // support from type inference rules to tell whether a rule
-                    // decides return type based on input types, for now all
-                    // operators will be recreated with new type if any operand
-                    // changed, unless the operator has "built-in" type.
-                    newType = rexBuilder.deriveReturnType(operator, clonedOperands);
                 }
                 newCall =
                         rexBuilder.makeCall(

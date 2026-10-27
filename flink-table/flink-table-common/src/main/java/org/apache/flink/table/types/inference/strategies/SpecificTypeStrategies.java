@@ -25,6 +25,7 @@ import org.apache.flink.table.types.CollectionDataType;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.KeyValueDataType;
 import org.apache.flink.table.types.inference.ConstantArgumentCount;
+import org.apache.flink.table.types.inference.LambdaInfo;
 import org.apache.flink.table.types.inference.TypeStrategies;
 import org.apache.flink.table.types.inference.TypeStrategy;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -242,22 +243,41 @@ public final class SpecificTypeStrategies {
 
     /**
      * Type strategy specific for {@link BuiltInFunctionDefinitions#ARRAY_REDUCE}. The result is the
-     * accumulator, i.e. the initial value (the second argument). It is nullable if the input array
-     * or the initial value is nullable, or if the reducer lambda body can produce {@code NULL}. The
-     * array element nullability alone does not make the result nullable: whether a {@code NULL}
-     * element turns the accumulator {@code NULL} is decided by the reducer body, whose result type
-     * already reflects that.
+     * accumulator: the reducer lambda's first parameter, whose type is the type of the initial
+     * value (the second argument) unless the input type strategy had to widen it. It is nullable if
+     * the input array or the initial value is nullable, or if the reducer lambda body can produce
+     * {@code NULL}. The array element nullability alone does not make the result nullable: whether
+     * a {@code NULL} element turns the accumulator {@code NULL} is decided by the reducer body,
+     * whose result type already reflects that.
      */
     public static final TypeStrategy ARRAY_REDUCE =
             callContext -> {
                 final List<DataType> argumentDataTypes = callContext.getArgumentDataTypes();
                 final DataType arrayType = argumentDataTypes.get(0);
-                final DataType accType = argumentDataTypes.get(1);
+                final DataType initialType = argumentDataTypes.get(1);
                 final org.apache.flink.table.types.logical.LogicalType lambdaResultType =
                         LambdaStrategyUtils.requireLambdaResultType(callContext, 2);
+                // The initial value is not necessarily cast to a widened accumulator: a cast that
+                // only changes the representation-compatible length (CHAR(0) to STRING) is
+                // avoided. The accumulator parameter is therefore the authoritative type.
+                final DataType accType =
+                        callContext
+                                .getLambdaArgument(2)
+                                .map(LambdaInfo::getParameterFields)
+                                .filter(fields -> fields.size() == 2)
+                                .map(fields -> fields.get(0).getDataType())
+                                .filter(
+                                        type ->
+                                                !type.getLogicalType()
+                                                        .copy(true)
+                                                        .equals(
+                                                                initialType
+                                                                        .getLogicalType()
+                                                                        .copy(true)))
+                                .orElse(initialType);
                 final boolean nullable =
                         arrayType.getLogicalType().isNullable()
-                                || accType.getLogicalType().isNullable()
+                                || initialType.getLogicalType().isNullable()
                                 || lambdaResultType.isNullable();
                 return Optional.of(nullable ? accType.nullable() : accType.notNull());
             };

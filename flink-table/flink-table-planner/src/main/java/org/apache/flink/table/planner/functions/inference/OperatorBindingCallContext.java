@@ -75,13 +75,41 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
     private final @Nullable List<ChangelogMode> inputChangelogModes;
     private final @Nullable ChangelogMode outputChangelogMode;
     private final @Nullable List<List<int[]>> inputUpsertKeys;
+    private final boolean lambdaBodiesAvailable;
 
+    /** Creates a call context that does not expose lambda bodies, as for type inference. */
     public OperatorBindingCallContext(
             DataTypeFactory dataTypeFactory,
             FunctionDefinition definition,
             SqlOperatorBinding binding,
             RelDataType returnRelDataType) {
-        this(dataTypeFactory, definition, binding, returnRelDataType, null, null, null, null);
+        this(dataTypeFactory, definition, binding, returnRelDataType, false);
+    }
+
+    /**
+     * Creates a call context.
+     *
+     * @param lambdaBodiesAvailable whether {@link #getLambdaArgument(int)} exposes the body of a
+     *     closed lambda. Set it only when the function is being specialized: type inference must
+     *     not see a body (see {@link LambdaInfo#getBody()}), so that a strategy behaves the same
+     *     during SQL validation, in the Table API and when the planner re-derives a return type.
+     */
+    public OperatorBindingCallContext(
+            DataTypeFactory dataTypeFactory,
+            FunctionDefinition definition,
+            SqlOperatorBinding binding,
+            RelDataType returnRelDataType,
+            boolean lambdaBodiesAvailable) {
+        this(
+                dataTypeFactory,
+                definition,
+                binding,
+                returnRelDataType,
+                null,
+                null,
+                null,
+                null,
+                lambdaBodiesAvailable);
     }
 
     public OperatorBindingCallContext(
@@ -100,9 +128,16 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
                 inputTimeColumns,
                 inputChangelogModes,
                 outputChangelogMode,
-                null);
+                null,
+                false);
     }
 
+    /**
+     * Creates a call context with planner information about the inputs and the output.
+     *
+     * @param lambdaBodiesAvailable whether {@link #getLambdaArgument(int)} exposes the body of a
+     *     closed lambda; set it only when the function is being specialized
+     */
     public OperatorBindingCallContext(
             DataTypeFactory dataTypeFactory,
             FunctionDefinition definition,
@@ -111,7 +146,8 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
             @Nullable List<Integer> inputTimeColumns,
             @Nullable List<ChangelogMode> inputChangelogModes,
             @Nullable ChangelogMode outputChangelogMode,
-            @Nullable List<List<int[]>> inputUpsertKeys) {
+            @Nullable List<List<int[]>> inputUpsertKeys,
+            boolean lambdaBodiesAvailable) {
         super(
                 dataTypeFactory,
                 definition,
@@ -149,6 +185,7 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
         this.inputChangelogModes = inputChangelogModes;
         this.outputChangelogMode = outputChangelogMode;
         this.inputUpsertKeys = inputUpsertKeys;
+        this.lambdaBodiesAvailable = lambdaBodiesAvailable;
     }
 
     @Override
@@ -267,13 +304,13 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
         // numbered apart from the lambda's own parameters, so the reference is resolved to the
         // field position rather than to the parameter index.
         //
-        // A lambda is only closed once its free variables have been lifted into parameters (see
-        // HigherOrderFunctionUtil#liftCaptures), which happens after the call has been converted.
-        // Until then a body may still reference a parameter of an enclosing lambda, which has no
-        // field of its own here and so cannot be expressed against this parameter row. The body is
-        // then not available -- which is what LambdaInfo#getBody documents for type inference,
-        // the only phase that sees an unlifted call.
-        final RexNode body = rewriteBodyAgainstParameters(lambda);
+        // The body is only exposed while the function is being specialized; type inference never
+        // sees it (see LambdaInfo#getBody), even when the planner re-derives the return type of a
+        // call whose lambdas are already closed. A body is also unavailable while the lambda is
+        // not closed, i.e. before HigherOrderFunctionUtil#liftCaptures has lifted its free
+        // variables into parameters: it may then reference a parameter of an enclosing lambda,
+        // which has no field of its own here and so cannot be expressed against this row.
+        final RexNode body = lambdaBodiesAvailable ? rewriteBodyAgainstParameters(lambda) : null;
         final DataType returnDataType =
                 fromLogicalToDataType(toLogicalType(lambda.getExpression().getType()));
         final RexNodeExpression bodyExpression =
@@ -322,10 +359,10 @@ public final class OperatorBindingCallContext extends AbstractSqlCallContext {
      * its {@code eval()} method: the lifted capture parameters (see {@link
      * HigherOrderFunctionUtil#CAPTURE_PARAM_INDEX_BASE}) are excluded, because they are bound
      * behind the function object instead of being passed by the caller. Only the user-visible
-     * parameters determine the conversion class ({@code Function} / {@code BiFunction} / {@code
-     * TriFunction}). Before capture lifting a lambda has no capture parameters, so this is a no-op
-     * there. The parameter and result types are exposed through {@link #getLambdaArgument(int)}
-     * instead.
+     * parameters determine the conversion class (a {@code FunctionN}, an accepted alias, or a
+     * {@code FunctionDataN}; see {@link FunctionType}). Before capture lifting a lambda has no
+     * capture parameters, so this is a no-op there. The parameter and result types are exposed
+     * through {@link #getLambdaArgument(int)} instead.
      */
     private static DataType lambdaDataType(RexLambda lambda) {
         final long parameterCount =

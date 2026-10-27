@@ -19,8 +19,11 @@
 package org.apache.flink.table.runtime.generated;
 
 import org.apache.flink.api.common.eventtime.WatermarkGeneratorSupplier;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.table.functions.FunctionContext;
+
+import javax.annotation.Nullable;
 
 /**
  * A function wrapper for {@link FunctionContext} if the source supports {@link
@@ -33,7 +36,18 @@ public class WatermarkGeneratorCodeGeneratorFunctionContextWrapper extends Funct
 
     public WatermarkGeneratorCodeGeneratorFunctionContextWrapper(
             WatermarkGeneratorSupplier.Context context) {
-        super(null, null, null);
+        this(context, null, null);
+    }
+
+    /**
+     * Also carries the class loader and open context of the generated watermark generator, which
+     * the generator hands on to a function called from a lambda body.
+     */
+    public WatermarkGeneratorCodeGeneratorFunctionContextWrapper(
+            WatermarkGeneratorSupplier.Context context,
+            @Nullable ClassLoader userClassLoader,
+            @Nullable OpenContext openContext) {
+        super(null, userClassLoader, openContext);
         this.context = context;
     }
 

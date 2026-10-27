@@ -854,11 +854,13 @@ public final class DataTypes {
      *
      * <p>The parameter count must be between zero and {@link
      * FunctionType#MAX_CONVERTIBLE_PARAMETER_COUNT}, because that is what a lambda can be
-     * represented as at runtime ({@link org.apache.flink.util.function.Function0}, {@link
-     * java.util.function.Function}, {@link java.util.function.BiFunction}, {@link
-     * org.apache.flink.util.function.TriFunction}, or {@link
-     * org.apache.flink.util.function.Function4}). Any other count is rejected with a {@link
-     * ValidationException}.
+     * represented as at runtime. The default conversion class is the {@code FunctionN} matching the
+     * count, from {@link org.apache.flink.util.function.Function0} to {@link
+     * org.apache.flink.util.function.Function4}. {@link java.util.function.Function}, {@link
+     * java.util.function.BiFunction} and {@link org.apache.flink.util.function.TriFunction} are
+     * accepted as equivalents at one to three parameters, and a function that works on internal
+     * data structures receives a {@code FunctionDataN} instead (see {@link FunctionType}). Any
+     * other count is rejected with a {@link ValidationException}.
      *
      * <p>Note: The runtime does not materialize a value of this type. It is a helper type during
      * translation, planning, and plan (de)serialization. Table columns cannot be declared with this

@@ -364,6 +364,33 @@ class UdfMetricsITCase {
     }
 
     @Test
+    void testLambdaBodySharesOneHandle() throws Exception {
+        StreamTableEnvironment tEnv = createTableEnv(true);
+        tEnv.createTemporarySystemFunction("lambdaudf", IntDoubler.class);
+        createSource(tEnv, "src", "id INT");
+        createBlackHoleSink(tEnv, "sink", "v INT");
+
+        JobID jobId =
+                execute(
+                        tEnv,
+                        "INSERT INTO sink SELECT lambdaudf(id) "
+                                + "+ CARDINALITY(ARRAY_FILTER("
+                                + "ARRAY_TRANSFORM(ARRAY[id, id], x -> lambdaudf(x)), "
+                                + "y -> lambdaudf(y) > 0)) "
+                                + "+ CARDINALITY(ARRAY_TRANSFORM("
+                                + "ARRAY[ARRAY[id]], b -> ARRAY_TRANSFORM(b, x -> lambdaudf(x)))) "
+                                + "FROM src");
+
+        // A call from a lambda body, also from a nested one, feeds the operator's handle: per row
+        // one call outside a body, two per two-element body and one in the nested body.
+        Map<String, Metric> processingTimes =
+                reporter.findMetrics(jobId, processingTimePattern("lambdaudf"));
+        assertThat(processingTimes).hasSize(1);
+        assertThat(((Histogram) processingTimes.values().iterator().next()).getCount())
+                .isEqualTo(6L * SOURCE_ROWS.size());
+    }
+
+    @Test
     void testDistinctFunctionsGetSeparateHandles() throws Exception {
         StreamTableEnvironment tEnv = createTableEnv(true);
         tEnv.createTemporarySystemFunction("doubleudf", IntDoubler.class);

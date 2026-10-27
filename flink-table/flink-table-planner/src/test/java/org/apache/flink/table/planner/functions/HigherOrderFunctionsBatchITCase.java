@@ -18,7 +18,14 @@
 
 package org.apache.flink.table.planner.functions;
 
+import org.apache.flink.api.common.eventtime.WatermarkGeneratorSupplier;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.configuration.CoreOptions;
+import org.apache.flink.configuration.PipelineOptions;
+import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Over;
@@ -27,34 +34,64 @@ import org.apache.flink.table.api.SqlParserException;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableDescriptor;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.config.TableConfigOptions;
 import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.CatalogView;
+import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.catalog.ObjectPath;
+import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
+import org.apache.flink.table.connector.source.abilities.SupportsWatermarkPushDown;
+import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.expressions.Expression;
+import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.UnresolvedLambdaExpression;
+import org.apache.flink.table.functions.AggregateFunction;
+import org.apache.flink.table.functions.AsyncScalarFunction;
+import org.apache.flink.table.functions.FunctionContext;
+import org.apache.flink.table.functions.ProcessTableFunction;
 import org.apache.flink.table.functions.ScalarFunction;
+import org.apache.flink.table.functions.TableFunction;
+import org.apache.flink.table.planner.factories.TableFactoryHarness;
 import org.apache.flink.table.planner.factories.TestValuesTableFactory;
+import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.PythonScalarFunction;
+import org.apache.flink.table.types.inference.InputTypeStrategies;
+import org.apache.flink.table.types.inference.StateTypeStrategy;
+import org.apache.flink.table.types.inference.StaticArgument;
+import org.apache.flink.table.types.inference.StaticArgumentTrait;
+import org.apache.flink.table.types.inference.TypeInference;
+import org.apache.flink.table.types.inference.TypeStrategies;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.clock.RelativeClock;
+import org.apache.flink.util.clock.SystemClock;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+
+import javax.annotation.Nullable;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import static org.apache.flink.table.api.Expressions.$;
+import static org.apache.flink.table.api.Expressions.call;
 import static org.apache.flink.table.api.Expressions.callSql;
 import static org.apache.flink.table.api.Expressions.lit;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -77,14 +114,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *       built-ins end to end, in batch, on both surfaces.
  *   <li>{@code testInvalidArguments*}, {@code testFilterPredicateAndReducerContract*}, {@code
  *       testLambdaOutsideOfHigherOrderFunctionIsRejected}, {@code
- *       testDuplicateLambdaParameterNamesAreRejected} — validation and signature error messages.
+ *       testDuplicateLambdaParameterNamesAreRejected}, {@code
+ *       testLambdaParameterCountMismatchIsRejectedOnTableApi}, {@code
+ *       testFunctionReferenceAsLambdaIsRejected} — validation and signature error messages.
+ *   <li>{@code *InLambdaBodyIsRejected} — table, asynchronous and Python functions, which cannot be
+ *       called from a lambda body.
  *   <li>{@code testArrayFilterOverEnclosingLambdaParameter}, {@code
- *       testFieldAccessOnRowLambdaParameter}, {@code
+ *       testLambdaParameterShadowingOnTableApi}, {@code testFieldAccessOnRowLambdaParameter},
+ *       {@code testFieldAccessInNestedLambdaBody}, {@code
  *       testCollectionConstructorsOverLambdaParameter}, {@code
  *       testMutableLambdaResultsAreNotAliased} — lambda parameter scoping and the no-aliasing rule
  *       for mutable results.
  *   <li>{@code testFunctionTypeRejected*} — the {@code FUNCTION} type cannot surface as a table
- *       column, in a resolved schema, or across a catalog round-trip.
+ *       column, in a resolved schema, across a catalog round-trip, or as the return or state type
+ *       of a function.
  *   <li>{@code testAggregate*}, {@code testCaptureOfGroupKeyInLambdaBody} — aggregates in and
  *       around lambda bodies, and capture of a group key.
  *   <li>{@code testOverWindowInLambdaBody*} — {@code OVER} windows in a lambda body.
@@ -97,12 +140,24 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>{@code testLambdaInWatermarkExpression}, {@code testLambdaInPartitionPredicate} — lambdas
  *       in generated classes without a runtime context: a watermark generator, with and without
  *       push-down into the source, and the planner's partition pruning.
+ *   <li>{@code testLambdaPredicateIsNotOfferedToSource} — a predicate with a lambda is never
+ *       offered to a source's filter push-down.
  *   <li>{@code testViewOver*} — the view / SQL-expansion round-trip.
  *   <li>{@code testNonDeterministicLambdaBody*} — per-call re-evaluation of a non-deterministic
  *       body; see also {@code HigherOrderFunctionDeterminismTest} for the planner-level analysis.
+ *   <li>{@code testUserDefinedFunctionInLambdaBody*}, {@code
+ *       testHigherOrderFunctionAsArgumentOfUserDefinedFunction}, {@code
+ *       testLambdaBodyErrorPropagatesUnchanged} — ordinary user-defined functions in and around a
+ *       lambda body: captures, nesting, lifecycle and error propagation.
  *   <li>{@code testLargeLambdaBodyIsSplitIntoSeparateMethods} — generated-code splitting for a body
  *       that exceeds the method size limit.
  * </ul>
+ *
+ * <p>Despite the class name, four tests create a streaming environment because the feature under
+ * test exists only there: {@code testFunctionTypeRejectedAsNamedStateEntry} (process table
+ * functions), {@code testOverWindowInLambdaBodyTableApi} (an event-time {@code OVER} window), and
+ * {@code testLambdaInWatermarkExpression} and {@code
+ * testUserDefinedFunctionInPushedDownWatermarkLambdaUsesSourceMetricGroup} (watermarks).
  *
  * <p>Only the first bullet duplicates {@link HigherOrderFunctionsITCase}; every other area is
  * mode-independent and has no streaming counterpart. Should {@link BuiltInFunctionTestBase} ever be
@@ -117,13 +172,19 @@ class HigherOrderFunctionsBatchITCase {
     @Test
     void testArrayHigherOrderFunctionsBatch() throws Exception {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
-        final Table input =
-                tEnv.fromValues(
-                        DataTypes.ROW(
-                                DataTypes.FIELD("f0", DataTypes.ARRAY(DataTypes.INT())),
-                                DataTypes.FIELD("f1", DataTypes.ARRAY(DataTypes.INT()))),
-                        Row.of(new Integer[] {1, 2, 3}, new Integer[] {10, 20}));
-        tEnv.createTemporaryView("t", input);
+        // a connector rather than fromValues, which cannot express an empty array literal
+        final String dataId =
+                TestValuesTableFactory.registerData(
+                        Arrays.asList(
+                                Row.of(new Integer[] {1, 2, 3}, new Integer[] {10, 20}),
+                                Row.of(null, new Integer[] {1}),
+                                Row.of(new Integer[] {1, null, 3}, new Integer[] {10, 20, 30}),
+                                Row.of(new Integer[0], new Integer[0])));
+        tEnv.executeSql(
+                "CREATE TABLE t (f0 ARRAY<INT>, f1 ARRAY<INT>) WITH ("
+                        + " 'connector' = 'values', 'bounded' = 'true', 'data-id' = '"
+                        + dataId
+                        + "')");
 
         final Table result =
                 tEnv.sqlQuery(
@@ -132,14 +193,25 @@ class HigherOrderFunctionsBatchITCase {
                                 + " ARRAY_REDUCE(f0, 0, (acc, x) -> acc + x),"
                                 + " ARRAY_ZIP_WITH(f0, f1, (x, y) -> x + COALESCE(y, 0)) FROM t");
 
+        // a NULL array gives NULL, a NULL element reaches the lambda (and a NULL predicate
+        // drops it), an empty array gives an empty array or the initial accumulator
         try (final CloseableIterator<Row> iterator = result.execute().collect()) {
-            assertThat(iterator).hasNext();
-            final Row row = iterator.next();
-            assertThat(row.getField(0)).isEqualTo(new Integer[] {2, 3, 4});
-            assertThat(row.getField(1)).isEqualTo(new Integer[] {2, 3});
-            assertThat(row.getField(2)).isEqualTo(6);
-            assertThat(row.getField(3)).isEqualTo(new Integer[] {11, 22, 3});
-            assertThat(iterator).isExhausted();
+            final List<Row> rows = new ArrayList<>();
+            iterator.forEachRemaining(rows::add);
+            assertThat(rows)
+                    .containsExactlyInAnyOrder(
+                            Row.of(
+                                    new Integer[] {2, 3, 4},
+                                    new Integer[] {2, 3},
+                                    6,
+                                    new Integer[] {11, 22, 3}),
+                            Row.of(null, null, null, null),
+                            Row.of(
+                                    new Integer[] {2, null, 4},
+                                    new Integer[] {3},
+                                    null,
+                                    new Integer[] {11, null, 33}),
+                            Row.of(new Integer[0], new Integer[0], 0, new Integer[0]));
         }
     }
 
@@ -191,6 +263,21 @@ class HigherOrderFunctionsBatchITCase {
                         + "'ARRAY_TRANSFORM(<INTEGER>, <FUNCTION(ANY) -> ANY>)'. "
                         + "Supported form(s): "
                         + "ARRAY_TRANSFORM(array ARRAY, lambda FUNCTION(ARRAY_ELEMENT_TYPE)->ANY)");
+        // the Table API reports the same call with the signature as well, not as a lambda error
+        assertThatThrownBy(() -> tEnv.from("t").select($("base").arrayTransform(x -> x.plus(1))))
+                .isInstanceOf(ValidationException.class)
+                .satisfies(
+                        e ->
+                                assertThat(ExceptionUtils.stringifyException(e))
+                                        .contains(
+                                                "Invalid input arguments. Expected signatures are:\n"
+                                                        + "ARRAY_TRANSFORM(array ARRAY, lambda "
+                                                        + "FUNCTION(ARRAY_ELEMENT_TYPE)->ANY)",
+                                                "Either the function does not declare a lambda "
+                                                        + "argument at position 1, or the lambda "
+                                                        + "parameter types cannot be derived from "
+                                                        + "the preceding argument types [INT].")
+                                        .doesNotContain("does not accept a lambda expression"));
         assertInvalidCall(
                 tEnv,
                 "SELECT ARRAY_TRANSFORM(a, base) FROM t",
@@ -228,16 +315,19 @@ class HigherOrderFunctionsBatchITCase {
                         + "'ARRAY_ZIP_WITH(<INTEGER ARRAY>, <INTEGER>, <FUNCTION(ANY, ANY) -> ANY>)'. "
                         + "Supported form(s): ARRAY_ZIP_WITH(array1 ARRAY, array2 ARRAY, "
                         + "lambda FUNCTION(ARRAY1_ELEMENT_TYPE, ARRAY2_ELEMENT_TYPE)->ANY)");
-        // a reducer whose body is not assignable to the accumulator type is rejected during
-        // validation (rather than failing later during code generation)
+        // a reducer whose body is not assignable to the accumulator type, and that the
+        // accumulator cannot be widened to without loss within its type family, is rejected during
+        // validation (rather than failing later during code generation), with a hint to cast
         assertInvalidCall(
                 tEnv,
-                "SELECT ARRAY_REDUCE(a, 0, (acc, x) -> acc + x * 0.5) FROM t",
+                "SELECT ARRAY_REDUCE(a, 0, (acc, x) -> acc + x * CAST(0.5 AS DOUBLE)) FROM t",
                 "Invalid function call:\nARRAY_REDUCE(ARRAY<INT>, INT NOT NULL, FUNCTION(2))",
                 "ARRAY_REDUCE(array ARRAY, initial INIT, "
                         + "lambda FUNCTION(INIT_TYPE, ARRAY_ELEMENT_TYPE)->INIT_TYPE)",
                 "The reducer of ARRAY_REDUCE must return a type assignable to the accumulator "
-                        + "type INT NOT NULL, but its body returns DECIMAL(14, 1).");
+                        + "type INT NOT NULL, but its body returns DOUBLE.",
+                "Cast the initial value to DOUBLE to accumulate in that type, or cast the "
+                        + "reducer's result to INT.");
         assertInvalidCall(
                 tEnv,
                 "SELECT ARRAY_REDUCE(a, 0, (acc, x) -> CAST(acc AS STRING)) FROM t",
@@ -270,7 +360,8 @@ class HigherOrderFunctionsBatchITCase {
                                                         lit(0),
                                                         (acc, x) -> acc.plus(x).times(lit(0.5)))))
                 .isInstanceOf(ValidationException.class)
-                .hasStackTraceContaining("must return a type assignable to the accumulator type");
+                .hasStackTraceContaining("must return a type assignable to the accumulator type")
+                .hasStackTraceContaining("Cast the initial value to DOUBLE");
     }
 
     @Test
@@ -294,6 +385,44 @@ class HigherOrderFunctionsBatchITCase {
             assertThat(iterator.next().getField(0)).isEqualTo(new Integer[][] {{3}, {4}});
             assertThat(iterator).isExhausted();
         }
+    }
+
+    @Test
+    void testLambdaParameterShadowingOnTableApi() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final Table input = higherOrderFunctionInput(tEnv);
+
+        // The typed Table API methods generate fresh parameter names, so shadowing is reachable
+        // only through explicit names. HigherOrderFunctionsITCase has the SQL counterparts.
+        // A parameter shadows the column of the same name (base = 10).
+        assertThat(
+                        collectSingle(
+                                input.select(
+                                        call(
+                                                "ARRAY_TRANSFORM",
+                                                $("a"),
+                                                new UnresolvedLambdaExpression(
+                                                        Collections.singletonList("base"),
+                                                        $("base").plus(1))))))
+                .isEqualTo(new Integer[] {2, 3, 4});
+        // An inner parameter shadows the enclosing parameter of the same name; resolving the
+        // inner x to the outer one would yield {{10, 10, 10}, {20, 20, 20}, {30, 30, 30}}.
+        assertThat(
+                        collectSingle(
+                                input.select(
+                                        call(
+                                                "ARRAY_TRANSFORM",
+                                                $("a"),
+                                                new UnresolvedLambdaExpression(
+                                                        Collections.singletonList("x"),
+                                                        call(
+                                                                "ARRAY_TRANSFORM",
+                                                                $("a"),
+                                                                new UnresolvedLambdaExpression(
+                                                                        Collections.singletonList(
+                                                                                "x"),
+                                                                        $("x").times(10))))))))
+                .isEqualTo(new Integer[][] {{10, 20, 30}, {10, 20, 30}, {10, 20, 30}});
     }
 
     @Test
@@ -352,6 +481,111 @@ class HigherOrderFunctionsBatchITCase {
                 "SELECT ARRAY_TRANSFORM(rs, r -> SUM(r.n)) FROM t",
                 "Aggregate functions over a lambda parameter are not supported",
                 "'r' is a lambda parameter");
+    }
+
+    @Test
+    void testFieldAccessInNestedLambdaBody() throws Exception {
+        // A nested lambda, and any lambda of a stand-alone expression (callSql), has its body typed
+        // once before the call owning it binds the parameters. A field of such a parameter, or of
+        // a value derived from it, must be deferred to the pass after binding. It used to fail with
+        // "This is a bug" (a field lookup on the unbound placeholder) or "Incompatible types".
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("a", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "orders",
+                                        DataTypes.ARRAY(
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD("id", DataTypes.INT()),
+                                                        DataTypes.FIELD(
+                                                                "items",
+                                                                DataTypes.ARRAY(
+                                                                        DataTypes.ROW(
+                                                                                DataTypes.FIELD(
+                                                                                        "price",
+                                                                                        DataTypes
+                                                                                                .INT()),
+                                                                                DataTypes.FIELD(
+                                                                                        "qty",
+                                                                                        DataTypes
+                                                                                                .INT())))))))),
+                        Row.of(
+                                new Integer[] {1, 2},
+                                new Row[] {
+                                    Row.of(1, new Row[] {Row.of(10, 2), Row.of(20, 0)}),
+                                    Row.of(2, new Row[] {Row.of(5, 1)})
+                                }));
+        tEnv.createTemporaryView("t", input);
+
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(orders, o -> ARRAY_TRANSFORM("
+                                        + "ARRAY_FILTER(o.items, i -> i.qty > 0), i -> i.price))"
+                                        + " FROM t"))
+                .isEqualTo(new Integer[][] {{10}, {5}});
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> ARRAY_TRANSFORM(orders, o -> ARRAY_REDUCE("
+                                        + "o.items, 0, (acc, i) -> acc + i.price * i.qty + x))) FROM t"))
+                .isEqualTo(new Integer[][] {{22, 6}, {24, 7}});
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> ARRAY_TRANSFORM(orders,"
+                                        + " o -> o.items[1].price + x)) FROM t"))
+                .isEqualTo(new Integer[][] {{11, 6}, {12, 7}});
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> ARRAY_TRANSFORM(a,"
+                                        + " y -> IFNULL(ROW(y, x), ROW(0, 0)).EXPR$1)) FROM t"))
+                .isEqualTo(new Integer[][] {{1, 1}, {2, 2}});
+        assertThat(
+                        collectSingle(
+                                input.select(
+                                        callSql(
+                                                "ARRAY_TRANSFORM(a, x -> ARRAY_TRANSFORM(orders,"
+                                                        + " o -> o.items[1].price + x))"))))
+                .isEqualTo(new Integer[][] {{11, 6}, {12, 7}});
+        assertThat(collectSingle(input.select(callSql("ARRAY_TRANSFORM(orders, o -> o.id)"))))
+                .isEqualTo(new Integer[] {1, 2});
+        assertThat(
+                        collectSingle(
+                                input.select(
+                                        callSql(
+                                                "ARRAY_TRANSFORM(a, x -> ARRAY[ROW(x, 1)][1].EXPR$0)"))))
+                .isEqualTo(new Integer[] {1, 2});
+
+        // An invalid field is reported once the parameter is bound, as at the top level.
+        final String[][] invalidFields = {
+            {"ARRAY_TRANSFORM(orders, o -> o.nope)", "Unknown field 'nope'"},
+            {"ARRAY_TRANSFORM(orders, o -> o.items[1].nope)", "Unknown field 'nope'"},
+            {"ARRAY_TRANSFORM(a, y -> y.f)", "Unknown field 'f'"}
+        };
+        for (String[] invalidField : invalidFields) {
+            assertThatThrownBy(
+                            () ->
+                                    tEnv.sqlQuery(
+                                            "SELECT ARRAY_TRANSFORM(a, x -> "
+                                                    + invalidField[0]
+                                                    + ") FROM t"))
+                    .isInstanceOf(ValidationException.class)
+                    .satisfies(
+                            e ->
+                                    assertThat(ExceptionUtils.stringifyException(e))
+                                            .contains(invalidField[1])
+                                            .doesNotContain("This is a bug"));
+        }
+
+        // Known limitation: a MULTISET constructor does not resolve lambda parameters.
+        assertInvalidCall(
+                tEnv,
+                "SELECT ARRAY_TRANSFORM(a, x -> MULTISET[x]) FROM t",
+                "Column 'x' not found in any table");
     }
 
     @Test
@@ -456,6 +690,14 @@ class HigherOrderFunctionsBatchITCase {
         // SQL rejects a lambda outside of a function call already at the parser
         assertThatThrownBy(() -> tEnv.sqlQuery("SELECT x -> x + 1 FROM t"))
                 .hasMessageContaining("SQL parse failed. Encountered \"->\"");
+
+        // a lambda passed to a function that does not declare a lambda argument parses, so the
+        // validator rejects it
+        assertThatThrownBy(() -> tEnv.sqlQuery("SELECT ARRAY_CONTAINS(a, x -> x) FROM t"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Function 'ARRAY_CONTAINS' does not accept a lambda expression at any "
+                                + "position.");
 
         // the Table API has no such syntax restriction, so the resolver rejects it
         assertThatThrownBy(
@@ -643,6 +885,79 @@ class HigherOrderFunctionsBatchITCase {
     }
 
     @Test
+    void testFunctionTypeRejectedAsReturnType() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("returns_function", FunctionReturningFunction.class);
+        tEnv.createTemporarySystemFunction(
+                "returns_nested_function", FunctionReturningNestedFunction.class);
+
+        // A lambda is a compile-time construct, so a function cannot hand one back as its result,
+        // neither directly nor nested in a constructed type. Any function can declare such a type
+        // through its type inference, whether or not it takes a lambda argument itself.
+        assertThatThrownBy(() -> tEnv.sqlQuery("SELECT returns_function()"))
+                .isInstanceOf(ValidationException.class)
+                .rootCause()
+                .hasMessageContaining(
+                        "Invalid output data type 'FUNCTION(1)'. The FUNCTION data type is a "
+                                + "helper type for lambda arguments of higher-order functions. It "
+                                + "cannot be materialized and is not supported as a table column, "
+                                + "persisted return type, or state type.");
+
+        assertThatThrownBy(() -> tEnv.sqlQuery("SELECT returns_nested_function()"))
+                .isInstanceOf(ValidationException.class)
+                .rootCause()
+                .hasMessageContaining("Invalid output data type 'ARRAY<FUNCTION(1)>'.");
+    }
+
+    @Test
+    void testFunctionTypeRejectedAsAccumulatorType() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction(
+                "function_acc_agg", FunctionAccumulatorAggregateFunction.class);
+
+        final Table input =
+                tEnv.fromValues(DataTypes.ROW(DataTypes.FIELD("f0", DataTypes.INT())), Row.of(1));
+
+        // A lambda object is valid only for the call it is passed to and has no serialized form,
+        // so it can never be kept between invocations. The type is rejected during validation
+        // rather than when the state serializer is built.
+        assertThatThrownBy(() -> input.select(call("function_acc_agg", $("f0"))))
+                .isInstanceOf(ValidationException.class)
+                .rootCause()
+                .hasMessageContaining(
+                        "Invalid accumulator data type 'FUNCTION(1)'. The FUNCTION data type is a "
+                                + "helper type for lambda arguments of higher-order functions. It "
+                                + "cannot be materialized and is not supported as a table column, "
+                                + "persisted return type, or state type.");
+    }
+
+    @Test
+    void testFunctionTypeRejectedAsNamedStateEntry() {
+        // process table functions are streaming-only
+        final TableEnvironment tEnv =
+                TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+        tEnv.createTemporarySystemFunction(
+                "function_state_ptf", FunctionStateProcessTableFunction.class);
+        tEnv.createTemporaryView(
+                "t",
+                tEnv.fromValues(DataTypes.ROW(DataTypes.FIELD("f0", DataTypes.INT())), Row.of(1)));
+
+        // Reflective extraction already rejects a non-composite state type, so this pins the guard
+        // for a function that declares its state types programmatically.
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery("SELECT * FROM function_state_ptf(t => TABLE t)")
+                                        .execute()
+                                        .await())
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Invalid data type 'FUNCTION(1)' for state entry 'lambda'. The FUNCTION "
+                                + "data type is a helper type for lambda arguments of higher-order "
+                                + "functions. It cannot be materialized and is not supported as a "
+                                + "table column, persisted return type, or state type.");
+    }
+
+    @Test
     void testDuplicateLambdaParameterNamesAreRejected() {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
         tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
@@ -666,6 +981,166 @@ class HigherOrderFunctionsBatchITCase {
                 .hasMessageContaining(
                         "The parameters of a lambda expression must have unique names. "
                                 + "Found duplicates: [x]");
+    }
+
+    @Test
+    void testLambdaParameterCountMismatchIsRejectedOnTableApi() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final Table input = higherOrderFunctionInput(tEnv);
+
+        // The typed lambda methods of the Table API fix the number of parameters at compile time,
+        // but a lambda built from UnresolvedLambdaExpression can declare any number of them. See
+        // testInvalidArgumentsAreRejectedWithTheFunctionSignature for the SQL counterpart.
+        assertThatThrownBy(
+                        () ->
+                                input.select(
+                                        call(
+                                                "ARRAY_TRANSFORM",
+                                                $("a"),
+                                                new UnresolvedLambdaExpression(
+                                                        Arrays.asList("x", "y"),
+                                                        $("x").plus($("y"))))))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "The lambda expression expects 1 parameter(s) but 2 were provided.");
+        assertThatThrownBy(
+                        () ->
+                                input.select(
+                                        call(
+                                                "ARRAY_REDUCE",
+                                                $("a"),
+                                                lit(0),
+                                                new UnresolvedLambdaExpression(
+                                                        Collections.singletonList("acc"),
+                                                        $("acc")))))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "The lambda expression expects 2 parameter(s) but 1 were provided.");
+    }
+
+    @Test
+    void testFunctionReferenceAsLambdaIsRejected() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("my_plus_one", PlusOneScalarFunction.class);
+        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+
+        // SQL has no function-valued expressions, so a bare function name at a lambda position is
+        // an ordinary identifier and is reported as such. The supported spelling is an explicit
+        // lambda, 'x -> my_plus_one(x)'.
+        assertInvalidCall(
+                tEnv,
+                "SELECT ARRAY_TRANSFORM(a, my_plus_one) FROM t",
+                "Column 'my_plus_one' not found in any table");
+    }
+
+    @Test
+    void testTableFunctionInLambdaBodyIsRejected() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("my_table_func", SplitTableFunction.class);
+        final Table input =
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("f0", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD("s", DataTypes.STRING())),
+                        Row.of(new Integer[] {1, 2, 3}, "a b"));
+        tEnv.createTemporaryView("t", input);
+
+        // A table function produces rows rather than a value, so it is rejected in a lambda body
+        // just as in any other scalar position. Without the check it would reach code generation
+        // and fail there with an unset collector.
+        final String expectedMessage =
+                "Table functions are not supported in the body of a lambda expression";
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery(
+                                        "SELECT ARRAY_TRANSFORM(f0, x -> my_table_func(s)) FROM t"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
+        assertThatThrownBy(
+                        () ->
+                                input.select(
+                                        $("f0").arrayTransform(x -> call("my_table_func", $("s")))))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
+    }
+
+    @Test
+    void testAsynchronousScalarFunctionInLambdaBodyIsRejected() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("my_async_plus_one", AsyncPlusOneScalarFunction.class);
+        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+
+        // An asynchronous function completes its future only after the per-element expression
+        // that would consume the result has been evaluated. Without the check the call reaches
+        // code generation, where the rule that extracts asynchronous calls out of a projection
+        // does not descend into lambda bodies, and fails to compile.
+        final String expectedMessage =
+                "Asynchronous scalar functions are not supported in the body of a lambda "
+                        + "expression";
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery(
+                                        "SELECT ARRAY_TRANSFORM(a, x -> my_async_plus_one(x)) FROM t"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
+        // also when the body does not reference the lambda parameter at all
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery(
+                                        "SELECT ARRAY_TRANSFORM(a, x -> my_async_plus_one(1)) FROM t"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
+        // the Table API validates the body during expression resolution, so it has its own check
+        assertThatThrownBy(
+                        () ->
+                                tEnv.from("t")
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                x ->
+                                                                        call(
+                                                                                AsyncPlusOneScalarFunction
+                                                                                        .class,
+                                                                                x))))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
+    }
+
+    @Test
+    void testPythonScalarFunctionInLambdaBodyIsRejected() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction(
+                "my_python_plus", new PythonScalarFunction("my_python_plus"));
+        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+
+        // Python calls are split out of a projection into a separate Python operator, which cannot
+        // happen per element of a lambda body. Without the check the body is planned into a Python
+        // calc that cannot evaluate the enclosing higher-order function.
+        final String expectedMessage =
+                "Python scalar functions are not supported in the body of a lambda expression";
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery(
+                                        "SELECT ARRAY_TRANSFORM(a, x -> my_python_plus(x, 1)) FROM t"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
+        assertThatThrownBy(
+                        () ->
+                                tEnv.sqlQuery(
+                                        "SELECT ARRAY_TRANSFORM(a, x -> my_python_plus(1, 1)) FROM t"))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
+        assertThatThrownBy(
+                        () ->
+                                tEnv.from("t")
+                                        .select(
+                                                $("a").arrayTransform(
+                                                                x ->
+                                                                        call(
+                                                                                "my_python_plus",
+                                                                                x,
+                                                                                lit(1)))))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(expectedMessage);
     }
 
     @Test
@@ -916,6 +1391,238 @@ class HigherOrderFunctionsBatchITCase {
     }
 
     @Test
+    void testColumnCaptureInAggregateArgument() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporaryView("t", groupedHigherOrderFunctionInput(tEnv));
+        tEnv.executeSql(
+                "CREATE TEMPORARY VIEW w AS SELECT * FROM (VALUES ('abc', 2), ('abc', 3)) AS w(g, k)");
+        final String weighted = "ARRAY_REDUCE(a, 0, (acc, x) -> acc + x * base)";
+
+        // An aggregate argument is converted against the row before aggregation, so a column the
+        // lambda captures there is a plain input reference of that row, not a correlation (see
+        // SqlToRelConverter#isSameQueryLambdaCapture). 6 * 10 + 6 * 20 = 180.
+        assertThat(collectSingleRow(tEnv, "SELECT SUM(" + weighted + ") FROM t")).isEqualTo(180);
+        assertThat(collectSingleRow(tEnv, "SELECT SUM(" + weighted + ") FROM t GROUP BY g"))
+                .isEqualTo(180);
+        assertThat(
+                        collectSingleRow(
+                                tEnv, "SELECT MAX(ARRAY_TRANSFORM(a, x -> x * base)[1]) FROM t"))
+                .isEqualTo(20);
+        assertThat(collectSingleRow(tEnv, "SELECT COUNT(DISTINCT " + weighted + ") FROM t"))
+                .isEqualTo(2L);
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT SUM(base) FILTER (WHERE " + weighted + " > 100) FROM t"))
+                .isEqualTo(20);
+        // in HAVING and ORDER BY, whose aggregates are converted the same way
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT g FROM t GROUP BY g HAVING SUM(" + weighted + ") = 180"))
+                .containsExactly("abc");
+        assertThat(collectColumn(tEnv, "SELECT g FROM t GROUP BY g ORDER BY SUM(" + weighted + ")"))
+                .containsExactly("abc");
+        // columns of both sides of a join: (6 * k + 3 * 10) + (6 * k + 3 * 20) per k
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT SUM(ARRAY_REDUCE(t.a, 0, (acc, x) -> acc + x * w.k"
+                                        + " + t.base)) FROM t JOIN w ON t.g = w.g GROUP BY w.k"))
+                .containsExactlyInAnyOrder(114, 126);
+        // inside the body of an enclosing lambda, which sees the aggregate's result
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> x + SUM(ARRAY_REDUCE(a, 0,"
+                                        + " (acc, y) -> acc + y * base))) FROM t GROUP BY a"))
+                .isEqualTo(new Integer[] {181, 182, 183});
+        // in an aggregating sub-query of a lambda body, capturing the sub-query's own column
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(ARRAY[1, 2], x -> x + (SELECT"
+                                        + " MAX(ARRAY_TRANSFORM(ARRAY[1], y -> y + u.base)[1])"
+                                        + " FROM t AS u))"))
+                .isEqualTo(new Integer[] {22, 23});
+
+        // A column of an *outer* query still crosses a query boundary and stays correlated, also
+        // next to a capture of the sub-query's own column. Per outer row: 12 * t.base = 120 and
+        // 240; (6 * 10 + 3 * t.base) + (6 * 20 + 3 * t.base) = 240 and 300.
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT (SELECT SUM(ARRAY_REDUCE(u.a, 0, (acc, x) -> acc + x"
+                                        + " * t.base)) FROM t AS u) FROM t"))
+                .containsExactlyInAnyOrder(120, 240);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT (SELECT SUM(ARRAY_REDUCE(u.a, 0, (acc, x) -> acc + x"
+                                        + " * u.base + t.base)) FROM t AS u) FROM t"))
+                .containsExactlyInAnyOrder(240, 300);
+    }
+
+    @Test
+    void testColumnCaptureInGroupBy() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporaryView("t", groupedHigherOrderFunctionInput(tEnv));
+        final String weighted = "ARRAY_REDUCE(a, 0, (acc, x) -> acc + x * base)";
+
+        // A lambda in GROUP BY sits under that clause's scope, but its captured column belongs to
+        // the same query. The group keys are 60 and 120.
+        assertThat(collectColumn(tEnv, "SELECT SUM(base) FROM t GROUP BY " + weighted))
+                .containsExactlyInAnyOrder(10, 20);
+        assertThat(collectColumn(tEnv, "SELECT " + weighted + " FROM t GROUP BY " + weighted))
+                .containsExactlyInAnyOrder(60, 120);
+    }
+
+    @Test
+    void testLambdaInOrderBy() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporaryView("t", groupedHigherOrderFunctionInput(tEnv));
+        tEnv.executeSql(
+                "CREATE TEMPORARY VIEW q AS SELECT * FROM (VALUES (1, ARRAY[30], 'b'),"
+                        + " (2, ARRAY[10], 'a'), (3, ARRAY[20], 'c')) AS q(v, arr, s)");
+        final String byBase = "ARRAY_TRANSFORM(a, x -> x * base)[1]";
+
+        // A body in ORDER BY resolves names as in any other clause: its parameters, then the
+        // columns of the FROM clause.
+        assertThat(collectColumn(tEnv, "SELECT base FROM t ORDER BY " + byBase + " DESC"))
+                .containsExactly(20, 10);
+        assertThat(collectColumn(tEnv, "SELECT base FROM t ORDER BY " + byBase + " DESC LIMIT 1"))
+                .containsExactly(20);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT base, " + byBase + " FROM t ORDER BY " + byBase + " DESC"))
+                .containsExactly(20, 10);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT DISTINCT base, "
+                                        + byBase
+                                        + " FROM t ORDER BY "
+                                        + byBase
+                                        + " DESC"))
+                .containsExactly(20, 10);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT * FROM (SELECT base, a FROM t) ORDER BY "
+                                        + byBase
+                                        + " DESC"))
+                .containsExactly(20, 10);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT base FROM t ORDER BY ARRAY_TRANSFORM(ARRAY[a],"
+                                        + " e -> ARRAY_TRANSFORM(e, x -> x * base))[1][1] DESC"))
+                .containsExactly(20, 10);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT s FROM q GROUP BY s"
+                                        + " ORDER BY ARRAY_TRANSFORM(ARRAY['x'], y -> y || s)[1] DESC"))
+                .containsExactly("c", "b", "a");
+        // A parameter shadows a select-list alias of its name: the order follows the elements
+        // (60, 20, 40), not v.
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT v AS x FROM q ORDER BY ARRAY_TRANSFORM(arr, x -> x * 2)[1]"))
+                .containsExactly(2, 3, 1);
+        // An alias that stands for the column of its name reads the same either way, also when
+        // repeated; outside a body, ORDER BY still sees the aliases.
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT base, t.base AS base FROM t ORDER BY " + byBase + " DESC"))
+                .containsExactly(20, 10);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT base AS y FROM t"
+                                        + " ORDER BY ARRAY_REDUCE(a, y, (acc, x) -> acc + x) DESC"))
+                .containsExactly(20, 10);
+
+        // Any other alias of a body's name is rejected rather than read as either the alias or
+        // the column: here the column base (10, 20) and the alias (20, 40) would sort alike, but
+        // only the column is in scope.
+        assertInvalidCall(
+                tEnv,
+                "SELECT base * 2 AS base FROM t ORDER BY " + byBase,
+                "A lambda body in ORDER BY cannot use the select-list alias 'base'");
+        assertInvalidCall(
+                tEnv,
+                "SELECT base * 2 AS base FROM t ORDER BY ARRAY_TRANSFORM(ARRAY[a],"
+                        + " e -> ARRAY_TRANSFORM(e, x -> x * base))[1][1]",
+                "A lambda body in ORDER BY cannot use the select-list alias 'base'");
+        assertInvalidCall(
+                tEnv,
+                "SELECT base AS y FROM t ORDER BY ARRAY_TRANSFORM(a, x -> x * y)[1]",
+                "A lambda body in ORDER BY cannot use the select-list alias 'y'");
+        assertInvalidCall(
+                tEnv,
+                "SELECT g, SUM(base) AS sb FROM t GROUP BY g"
+                        + " ORDER BY ARRAY_TRANSFORM(ARRAY[1], x -> x * sb)[1]",
+                "A lambda body in ORDER BY cannot use the select-list alias 'sb'");
+        // the column qualified with its table alias is what the message suggests
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT base * 2 AS base FROM t"
+                                        + " ORDER BY ARRAY_TRANSFORM(a, x -> x * t.base)[1] DESC"))
+                .containsExactly(40, 20);
+    }
+
+    @Test
+    void testCommonJoinColumnInLambdaBody() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.executeSql(
+                "CREATE TEMPORARY VIEW t1 AS SELECT * FROM (VALUES (ARRAY[1, 2], 10),"
+                        + " (ARRAY[3], 30)) AS t1(a, base)");
+        tEnv.executeSql(
+                "CREATE TEMPORARY VIEW t2 AS SELECT * FROM (VALUES (10, 'x'), (20, 'y'))"
+                        + " AS t2(base, s)");
+
+        // Known limitation: the select list accepts a column merged by USING or NATURAL
+        // unqualified, but a lambda body does not, because the select-list expansion that turns
+        // it into COALESCE(t1.base, t2.base) leaves a lambda alone.
+        assertThat(collectColumn(tEnv, "SELECT base * 2 FROM t1 JOIN t2 USING (base)"))
+                .containsExactly(20);
+        assertInvalidCall(
+                tEnv,
+                "SELECT ARRAY_TRANSFORM(a, x -> x * base) FROM t1 JOIN t2 USING (base)",
+                "Column 'base' is ambiguous");
+        assertInvalidCall(
+                tEnv,
+                "SELECT ARRAY_TRANSFORM(a, x -> x * base) FROM t1 NATURAL JOIN t2",
+                "Column 'base' is ambiguous");
+
+        // the workarounds that the documentation gives
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> x * t1.base)[2]"
+                                        + " FROM t1 JOIN t2 USING (base)"))
+                .containsExactly(20);
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(ARRAY[1], x -> x * COALESCE(t1.base, t2.base))[1]"
+                                        + " FROM t1 FULL JOIN t2 USING (base)"))
+                .containsExactlyInAnyOrder(10, 20, 30);
+        // a parameter named like the merged column shadows it, as it shadows any column
+        assertThat(
+                        collectColumn(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, base -> base * 2)[2]"
+                                        + " FROM t1 JOIN t2 USING (base)"))
+                .containsExactly(4);
+    }
+
+    @Test
     void testCaptureOfGroupKeyInLambdaBody() throws Exception {
         final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
         tEnv.createTemporaryView("t", groupedHigherOrderFunctionInput(tEnv));
@@ -1053,6 +1760,83 @@ class HigherOrderFunctionsBatchITCase {
                 tEnv,
                 "SELECT ARRAY_TRANSFORM(a, x -> x IN (SELECT base FROM t)) FROM t",
                 "Subqueries over a lambda parameter are not supported");
+
+        // an unqualified name is not resolved against the sub-query, so the parameter's name wins
+        // over a column of the sub-query; the message suggests qualifying the column or renaming
+        // the parameter
+        assertInvalidCall(
+                tEnv,
+                "SELECT ARRAY_TRANSFORM(a, x -> x + (SELECT MAX(x) FROM (VALUES (10), (20))"
+                        + " AS q(x))) FROM t",
+                "If the subquery is not meant to use the lambda parameter, qualify its own column"
+                        + " with its table alias (for example 'q.x') or rename the lambda"
+                        + " parameter.");
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, z -> z + (SELECT MAX(x) FROM"
+                                        + " (VALUES (10), (20)) AS q(x))) FROM t GROUP BY a"))
+                .isEqualTo(new Integer[] {21, 22, 23});
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> x + (SELECT MAX(q.x) FROM"
+                                        + " (VALUES (10), (20)) AS q(x))) FROM t GROUP BY a"))
+                .isEqualTo(new Integer[] {21, 22, 23});
+
+        // a qualified name resolves against a table alias of the sub-query first, also when the
+        // alias, a table or a WITH item has the parameter's name: the x.v outside the sub-query
+        // is the field of the element (1), the x.v inside it the column of the alias (20)
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(CAST(ARRAY[ROW(1)] AS ARRAY<ROW<v INT>>),"
+                                        + " x -> x.v + (SELECT MAX(x.v) FROM (VALUES (10), (20))"
+                                        + " AS x(v)))"))
+                .isEqualTo(new Integer[] {21});
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, t -> t + (SELECT MAX(t.base) FROM t))"
+                                        + " FROM t GROUP BY a"))
+                .isEqualTo(new Integer[] {21, 22, 23});
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> x + (SELECT MAX(x.base) FROM t AS x"
+                                        + " JOIN t AS y ON x.base = y.base)) FROM t GROUP BY a"))
+                .isEqualTo(new Integer[] {21, 22, 23});
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> x + (WITH x AS (SELECT base FROM t)"
+                                        + " SELECT MAX(x.base) FROM x)) FROM t GROUP BY a"))
+                .isEqualTo(new Integer[] {21, 22, 23});
+
+        // but an alias declared in a derived table is not visible outside it, so there x.v is
+        // the parameter's field
+        assertInvalidCall(
+                tEnv,
+                "SELECT ARRAY_TRANSFORM(CAST(ARRAY[ROW(1)] AS ARRAY<ROW<v INT>>), x -> x.v +"
+                        + " (SELECT MAX(q.v) + x.v FROM (SELECT v FROM (VALUES (10)) AS x(v))"
+                        + " AS q))",
+                "Subqueries over a lambda parameter are not supported in the body of a lambda "
+                        + "expression. 'x' is a lambda parameter");
+
+        // a lambda nested in such a sub-query sees the alias too, and as a column of the
+        // sub-query it is subject to its GROUP BY
+        assertThat(
+                        collectSingleRow(
+                                tEnv,
+                                "SELECT ARRAY_TRANSFORM(a, x -> x + (SELECT ARRAY_TRANSFORM("
+                                        + "ARRAY[1], y -> y + x.base)[1] FROM t AS x WHERE"
+                                        + " x.base = 20)) FROM t GROUP BY a"))
+                .isEqualTo(new Integer[] {22, 23, 24});
+        assertInvalidCall(
+                tEnv,
+                "SELECT ARRAY_TRANSFORM(a, x -> x + (SELECT ARRAY_TRANSFORM(ARRAY[1], y -> y +"
+                        + " x.base)[1] FROM t AS x GROUP BY x.g)) FROM t GROUP BY a",
+                "Expression 'x.base' is not being grouped");
     }
 
     @Test
@@ -1303,6 +2087,55 @@ class HigherOrderFunctionsBatchITCase {
         }
     }
 
+    /**
+     * A watermark generator pushed into a source has no runtime context, but the source hands it a
+     * watermark context with the source's metric group. A function called from a lambda body in the
+     * watermark expression reports to that group, like one called outside a body.
+     */
+    @Test
+    void testUserDefinedFunctionInPushedDownWatermarkLambdaUsesSourceMetricGroup() {
+        final TableEnvironment tEnv =
+                TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+        tEnv.createTemporarySystemFunction("my_metrics", MetricGroupRecordingScalarFunction.class);
+        final WatermarkCapturingSource source = new WatermarkCapturingSource();
+        tEnv.createTable(
+                "t",
+                TableFactoryHarness.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("a", DataTypes.ARRAY(DataTypes.INT()))
+                                        .column("ts", DataTypes.TIMESTAMP(3))
+                                        .watermark(
+                                                "ts",
+                                                "CASE WHEN CARDINALITY(ARRAY_FILTER(a,"
+                                                        + " x -> my_metrics(x) > 0)) > 0"
+                                                        + " THEN ts - INTERVAL '1' SECOND"
+                                                        + " ELSE ts END")
+                                        .build())
+                        .source(source)
+                        .build());
+        tEnv.explainSql("SELECT * FROM t");
+        assertThat(source.watermarkStrategy).isNotNull();
+
+        MetricGroupRecordingScalarFunction.OPENED_WITH.clear();
+        final MetricGroup sourceMetricGroup = new UnregisteredMetricsGroup();
+        source.watermarkStrategy.createWatermarkGenerator(
+                new WatermarkGeneratorSupplier.Context() {
+                    @Override
+                    public MetricGroup getMetricGroup() {
+                        return sourceMetricGroup;
+                    }
+
+                    @Override
+                    public RelativeClock getInputActivityClock() {
+                        return SystemClock.getInstance();
+                    }
+                });
+        assertThat(MetricGroupRecordingScalarFunction.OPENED_WITH)
+                .singleElement()
+                .isSameAs(sourceMetricGroup);
+    }
+
     @Test
     void testLambdaInPartitionPredicate() throws Exception {
         // A predicate on partition columns only is evaluated in the planner against the listed
@@ -1326,6 +2159,34 @@ class HigherOrderFunctionsBatchITCase {
                         + " WHERE CARDINALITY(ARRAY_FILTER(ARRAY['A', 'C'], x -> x = region)) > 0";
         assertThat(tEnv.explainSql(query)).contains("partitions=[{region=A}, {region=C}]");
         assertThat(collectColumn(tEnv, query)).containsExactlyInAnyOrder(1, 3);
+    }
+
+    @Test
+    void testLambdaPredicateIsNotOfferedToSource() {
+        // A lambda cannot be expressed as an Expression for a connector, so a conjunct with a
+        // higher-order call stays in the Calc above the scan. The other conjuncts are still pushed.
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        final FilterRecordingSource source = new FilterRecordingSource();
+        tEnv.createTable(
+                "t",
+                TableFactoryHarness.newBuilder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT())
+                                        .column("a", DataTypes.ARRAY(DataTypes.INT()))
+                                        .build())
+                        .source(source)
+                        .build());
+
+        final String plan =
+                tEnv.explainSql(
+                        "SELECT id FROM t"
+                                + " WHERE id > 1 AND CARDINALITY(ARRAY_FILTER(a, x -> x > id)) > 0");
+
+        assertThat(source.offeredFilters)
+                .isNotEmpty()
+                .allSatisfy(filter -> assertThat(filter).isEqualTo("greaterThan(id, 1)"));
+        assertThat(plan).contains("ARRAY_FILTER");
     }
 
     @Test
@@ -1504,6 +2365,164 @@ class HigherOrderFunctionsBatchITCase {
         assertThat(CountingScalarFunction.COUNTER).hasValue(6);
     }
 
+    @Test
+    void testUserDefinedFunctionInLambdaBody() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("my_plus_one", PlusOneScalarFunction.class);
+        tEnv.createTemporarySystemFunction("my_add", AddScalarFunction.class);
+        tEnv.createTemporaryView(
+                "t",
+                tEnv.fromValues(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("f0", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD("base", DataTypes.INT())),
+                        Row.of(new Integer[] {1, 2, 3}, 100)));
+
+        // an ordinary user-defined function called from a lambda body, with and without an outer
+        // capture, and at the innermost level of a nested lambda: per e, the fold yields
+        // e + sum(x + base) = e + 306
+        try (final CloseableIterator<Row> iterator =
+                tEnv.sqlQuery(
+                                "SELECT ARRAY_TRANSFORM(f0, x -> my_plus_one(x)),"
+                                        + " ARRAY_TRANSFORM(f0, x -> my_add(x, base)),"
+                                        + " ARRAY_TRANSFORM(f0, e -> ARRAY_REDUCE(f0, e,"
+                                        + " (acc, x) -> my_add(acc, my_add(x, base)))) FROM t")
+                        .execute()
+                        .collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+            assertThat(row.getField(0)).isEqualTo(new Integer[] {2, 3, 4});
+            assertThat(row.getField(1)).isEqualTo(new Integer[] {101, 102, 103});
+            assertThat(row.getField(2)).isEqualTo(new Integer[] {307, 308, 309});
+            assertThat(iterator).isExhausted();
+        }
+
+        // the same through the Table API, calling the functions by name: the calls in a lambda
+        // body, including a nested one, are looked up together with the rest of the projection
+        try (final CloseableIterator<Row> iterator =
+                tEnv.from("t")
+                        .select(
+                                $("f0").arrayTransform(x -> call("my_plus_one", x)),
+                                $("f0").arrayTransform(x -> call("my_add", x, $("base"))),
+                                $("f0").arrayTransform(
+                                                x ->
+                                                        $("f0").arrayFilter(
+                                                                        y ->
+                                                                                call("my_add", x, y)
+                                                                                        .isGreater(
+                                                                                                4))
+                                                                .cardinality()))
+                        .execute()
+                        .collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+            assertThat(row.getField(0)).isEqualTo(new Integer[] {2, 3, 4});
+            assertThat(row.getField(1)).isEqualTo(new Integer[] {101, 102, 103});
+            assertThat(row.getField(2)).isEqualTo(new Integer[] {0, 1, 2});
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    @Test
+    void testHigherOrderFunctionAsArgumentOfUserDefinedFunction() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("my_plus_one", PlusOneScalarFunction.class);
+        tEnv.createTemporarySystemFunction("my_add", AddScalarFunction.class);
+        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+
+        // the opposite direction: a lambda-carrying call as the argument of an ordinary function,
+        // once with a body that itself calls ordinary functions: ((0 + 2) + 3) + 4 + 1 = 10
+        try (final CloseableIterator<Row> iterator =
+                tEnv.sqlQuery(
+                                "SELECT my_plus_one(ARRAY_REDUCE(a, 0, (acc, x) -> acc + x)),"
+                                        + " my_plus_one(ARRAY_REDUCE(a, 0,"
+                                        + " (acc, x) -> my_add(acc, my_plus_one(x)))) FROM t")
+                        .execute()
+                        .collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+            assertThat(row.getField(0)).isEqualTo(7);
+            assertThat(row.getField(1)).isEqualTo(10);
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    /**
+     * A function called from a lambda body keeps its regular lifecycle, although the body is
+     * compiled into a class of its own and evaluated once per element: {@code open()} runs once
+     * before the first element, and {@code close()} once when the task finishes.
+     */
+    @Test
+    void testUserDefinedFunctionInLambdaBodyIsOpenedAndClosed() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("my_tracked", LifecycleTrackingScalarFunction.class);
+        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+
+        LifecycleTrackingScalarFunction.OPEN_COUNT.set(0);
+        LifecycleTrackingScalarFunction.CLOSE_COUNT.set(0);
+
+        final TableResult result =
+                tEnv.sqlQuery("SELECT ARRAY_TRANSFORM(a, x -> my_tracked(x)) FROM t").execute();
+        try (final CloseableIterator<Row> iterator = result.collect()) {
+            assertThat(iterator).hasNext();
+            // the offset is established in open(), so x + 1000 shows it ran before the first call
+            assertThat(iterator.next().getField(0)).isEqualTo(new Integer[] {1001, 1002, 1003});
+            assertThat(iterator).isExhausted();
+        }
+        // a finished job has run close() on every task
+        result.await();
+
+        assertThat(LifecycleTrackingScalarFunction.OPEN_COUNT).hasValue(1);
+        assertThat(LifecycleTrackingScalarFunction.CLOSE_COUNT).hasValue(1);
+    }
+
+    /**
+     * A function called from a lambda body is opened with the operator's context, so it sees the
+     * job parameters and the task info like a function called outside a body, also in a nested
+     * body.
+     */
+    @Test
+    void testUserDefinedFunctionInLambdaBodyIsOpenedWithOperatorContext() throws Exception {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.getConfig()
+                .set(
+                        PipelineOptions.GLOBAL_JOB_PARAMETERS,
+                        Collections.singletonMap("lambda.offset", "500"));
+        tEnv.createTemporarySystemFunction("my_context", JobParameterScalarFunction.class);
+        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+
+        try (final CloseableIterator<Row> iterator =
+                tEnv.sqlQuery(
+                                "SELECT ARRAY_TRANSFORM(a, x -> my_context(x)), "
+                                        + "ARRAY_TRANSFORM(a, x -> "
+                                        + "ARRAY_TRANSFORM(ARRAY[x], y -> my_context(y))[1]) "
+                                        + "FROM t")
+                        .execute()
+                        .collect()) {
+            assertThat(iterator).hasNext();
+            final Row row = iterator.next();
+            assertThat(row.getField(0)).isEqualTo(new Integer[] {501, 502, 503});
+            assertThat(row.getField(1)).isEqualTo(new Integer[] {501, 502, 503});
+            assertThat(iterator).isExhausted();
+        }
+    }
+
+    @Test
+    void testLambdaBodyErrorPropagatesUnchanged() {
+        final TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tEnv.createTemporarySystemFunction("my_throw", ThrowingScalarFunction.class);
+        tEnv.createTemporaryView("t", higherOrderFunctionInput(tEnv));
+
+        // an unchecked exception thrown while the body is evaluated fails the job with that
+        // exception as the root cause, as it would outside of a lambda
+        assertThatThrownBy(
+                        () ->
+                                collectSingleRow(
+                                        tEnv, "SELECT ARRAY_TRANSFORM(a, x -> my_throw(x)) FROM t"))
+                .hasRootCauseInstanceOf(IllegalStateException.class)
+                .hasRootCauseMessage("boom for 1");
+    }
+
     /**
      * A lambda body is compiled into a generated class of its own, but that class is subject to the
      * JVM's 64 KB per-method limit like any other, and machine-generated SQL can drive a body past
@@ -1617,6 +2636,231 @@ class HigherOrderFunctionsBatchITCase {
         @Override
         public boolean isDeterministic() {
             return false;
+        }
+    }
+
+    /** An ordinary (non-higher-order) function, used inside lambda bodies. */
+    public static class PlusOneScalarFunction extends ScalarFunction {
+
+        public @Nullable Integer eval(@Nullable Integer x) {
+            return x == null ? null : x + 1;
+        }
+    }
+
+    /** An ordinary (non-higher-order) function of two arguments, used inside lambda bodies. */
+    public static class AddScalarFunction extends ScalarFunction {
+
+        public @Nullable Integer eval(@Nullable Integer x, @Nullable Integer y) {
+            if (x == null || y == null) {
+                return null;
+            }
+            return x + y;
+        }
+    }
+
+    /**
+     * An ordinary function that counts its lifecycle calls and adds an offset established in {@link
+     * #open(FunctionContext)}, so that a call before {@code open()} would return {@code x} rather
+     * than {@code x + 1000}.
+     */
+    public static class LifecycleTrackingScalarFunction extends ScalarFunction {
+
+        static final AtomicInteger OPEN_COUNT = new AtomicInteger();
+        static final AtomicInteger CLOSE_COUNT = new AtomicInteger();
+
+        private transient int offset;
+
+        @Override
+        public void open(FunctionContext context) {
+            OPEN_COUNT.incrementAndGet();
+            offset = 1000;
+        }
+
+        @Override
+        public void close() {
+            CLOSE_COUNT.incrementAndGet();
+        }
+
+        public @Nullable Integer eval(@Nullable Integer x) {
+            return x == null ? null : x + offset;
+        }
+    }
+
+    /**
+     * An ordinary function that adds an offset read from the job parameters in {@link
+     * #open(FunctionContext)}, and requires the task info there, both of which only an operator's
+     * runtime context provides.
+     */
+    public static class JobParameterScalarFunction extends ScalarFunction {
+
+        private transient int offset;
+
+        @Override
+        public void open(FunctionContext context) {
+            assertThat(context.getTaskInfo().getNumberOfParallelSubtasks()).isPositive();
+            offset = Integer.parseInt(context.getJobParameter("lambda.offset", "0"));
+        }
+
+        public @Nullable Integer eval(@Nullable Integer x) {
+            return x == null ? null : x + offset;
+        }
+    }
+
+    /** An ordinary function that fails, for use in a lambda body. */
+    public static class ThrowingScalarFunction extends ScalarFunction {
+
+        public Integer eval(Integer i) {
+            throw new IllegalStateException("boom for " + i);
+        }
+    }
+
+    /** Records the metric group of the context it is opened with. */
+    public static class MetricGroupRecordingScalarFunction extends ScalarFunction {
+
+        static final List<MetricGroup> OPENED_WITH = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void open(FunctionContext context) {
+            OPENED_WITH.add(context.getMetricGroup());
+        }
+
+        public @Nullable Integer eval(@Nullable Integer x) {
+            return x;
+        }
+    }
+
+    /** A source that keeps the watermark strategy pushed into it. */
+    private static class WatermarkCapturingSource extends TableFactoryHarness.ScanSourceBase
+            implements SupportsWatermarkPushDown {
+
+        private @Nullable WatermarkStrategy<RowData> watermarkStrategy;
+
+        @Override
+        public void applyWatermark(WatermarkStrategy<RowData> watermarkStrategy) {
+            this.watermarkStrategy = watermarkStrategy;
+        }
+    }
+
+    /** A source that accepts no filter and keeps a summary of every filter offered to it. */
+    private static class FilterRecordingSource extends TableFactoryHarness.ScanSourceBase
+            implements SupportsFilterPushDown {
+
+        private final List<String> offeredFilters = new ArrayList<>();
+
+        @Override
+        public Result applyFilters(List<ResolvedExpression> filters) {
+            filters.forEach(filter -> offeredFilters.add(filter.asSummaryString()));
+            return Result.of(Collections.emptyList(), filters);
+        }
+    }
+
+    /** A table function, which is not supported in a lambda body. */
+    @FunctionHint(output = @DataTypeHint("ROW<word STRING>"))
+    public static class SplitTableFunction extends TableFunction<Row> {
+
+        public void eval(String s) {
+            for (String part : s.split(" ")) {
+                collect(Row.of(part));
+            }
+        }
+    }
+
+    /** An asynchronous scalar function, which is not supported in a lambda body. */
+    public static class AsyncPlusOneScalarFunction extends AsyncScalarFunction {
+
+        public void eval(CompletableFuture<Integer> future, Integer i) {
+            future.complete(i + 1);
+        }
+    }
+
+    /** A function that declares a {@code FUNCTION} return type, which is never materializable. */
+    public static class FunctionReturningFunction extends ScalarFunction {
+
+        public Object eval() {
+            return null;
+        }
+
+        @Override
+        public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+            return TypeInference.newBuilder()
+                    .inputTypeStrategy(InputTypeStrategies.sequence())
+                    .outputTypeStrategy(TypeStrategies.explicit(DataTypes.FUNCTION(1)))
+                    .build();
+        }
+    }
+
+    /** Like {@link FunctionReturningFunction}, but with the type nested in an array. */
+    public static class FunctionReturningNestedFunction extends ScalarFunction {
+
+        public Object eval() {
+            return null;
+        }
+
+        @Override
+        public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+            return TypeInference.newBuilder()
+                    .inputTypeStrategy(InputTypeStrategies.sequence())
+                    .outputTypeStrategy(
+                            TypeStrategies.explicit(DataTypes.ARRAY(DataTypes.FUNCTION(1))))
+                    .build();
+        }
+    }
+
+    /** An aggregate function that declares a {@code FUNCTION} accumulator. */
+    public static class FunctionAccumulatorAggregateFunction
+            extends AggregateFunction<Integer, Object> {
+
+        @Override
+        public Object createAccumulator() {
+            return null;
+        }
+
+        public void accumulate(Object acc, Integer value) {}
+
+        @Override
+        public Integer getValue(Object accumulator) {
+            return null;
+        }
+
+        @Override
+        public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+            return TypeInference.newBuilder()
+                    .inputTypeStrategy(
+                            InputTypeStrategies.sequence(
+                                    InputTypeStrategies.logical(LogicalTypeRoot.INTEGER)))
+                    .accumulatorTypeStrategy(TypeStrategies.explicit(DataTypes.FUNCTION(1)))
+                    .outputTypeStrategy(TypeStrategies.explicit(DataTypes.INT()))
+                    .build();
+        }
+    }
+
+    /**
+     * Like {@link FunctionAccumulatorAggregateFunction}, but for a named state entry of a process
+     * table function. The state types are declared programmatically because reflective extraction
+     * rejects a non-composite state type earlier.
+     */
+    public static class FunctionStateProcessTableFunction extends ProcessTableFunction<Integer> {
+
+        public void eval(Function<Integer, Integer> lambda, Row t) {
+            collect(1);
+        }
+
+        @Override
+        public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+            final LinkedHashMap<String, StateTypeStrategy> stateTypeStrategies =
+                    new LinkedHashMap<>();
+            stateTypeStrategies.put(
+                    "lambda", StateTypeStrategy.of(TypeStrategies.explicit(DataTypes.FUNCTION(1))));
+            return TypeInference.newBuilder()
+                    .staticArguments(
+                            StaticArgument.table(
+                                    "t",
+                                    Row.class,
+                                    false,
+                                    EnumSet.of(StaticArgumentTrait.ROW_SEMANTIC_TABLE)))
+                    .stateTypeStrategies(stateTypeStrategies)
+                    .outputTypeStrategy(TypeStrategies.explicit(DataTypes.INT()))
+                    .build();
         }
     }
 

@@ -28,11 +28,12 @@ import java.util.Optional;
  * An {@link InputTypeStrategy} that declares one or more lambda arguments.
  *
  * <p>The expression resolver and the planner use this to bind the types of a lambda's parameters
- * from the sibling arguments before resolving the lambda body. Implementing this interface is what
- * declares that the signature contains a lambda: a strategy without a lambda argument must not
- * implement it, because the interface alone rejects a lambda argument for a function kind that
- * cannot host one. The same method is consulted on both surfaces, so a function that implements
- * this interface behaves identically in SQL and in the Table API.
+ * from the arguments that precede the lambda, before resolving the lambda body. Implementing this
+ * interface is what declares that the signature contains a lambda: a strategy without a lambda
+ * argument must not implement it, because the interface alone rejects a lambda argument for a
+ * function kind that cannot host one. The same method is consulted on both surfaces, so a strategy
+ * that follows the rules of {@link #getExpectedLambdaParameterTypes} binds the same parameter types
+ * in SQL and in the Table API.
  *
  * <p>This is the only way to declare a lambda argument. A function that wants one implements this
  * interface as its {@link
@@ -71,12 +72,16 @@ import java.util.Optional;
  *   <li><b>Invocation</b>: the function owns its loop and may apply the object zero, one, or
  *       arbitrarily many times, in any order. The framework never applies the lambda on the
  *       function's behalf, thus the body is only evaluated where the function applies it.
- *   <li><b>Arguments and result</b>: {@code apply} may be called with {@code null} arguments and
- *       may return {@code null} (i.e. SQL {@code NULL}). A lambda exposed through a {@code
- *       FunctionN} exchanges external values. A lambda exposed through the corresponding
- *       internal-data interface may return a mutable value backed by evaluator-owned memory that
- *       the next application reuses. A function that retains or buffers such an internal result
- *       across another application must deep-copy it first.
+ *   <li><b>Arguments and result</b>: {@code apply} may be called with {@code null} only for a
+ *       parameter whose type in {@link LambdaInfo#getParameterFields()} is nullable. The compiled
+ *       body trusts the declared types, so passing {@code null} for a {@code NOT NULL} parameter is
+ *       undefined behavior. A function that may pass {@code null}, for example to pad the shorter
+ *       of two inputs, must declare that parameter nullable. {@code apply} returns {@code null}
+ *       (i.e. SQL {@code NULL}) only if {@link LambdaInfo#getReturnDataType()} is nullable. A
+ *       lambda exposed through a {@code FunctionN} exchanges external values. A lambda exposed
+ *       through the corresponding internal-data interface may return a mutable value backed by
+ *       evaluator-owned memory that the next application reuses. A function that retains or buffers
+ *       such an internal result across another application must deep-copy it first.
  *   <li><b>Nesting</b>: applications of different lambda objects may nest to any depth, as a body
  *       may contain another higher-order call whose function receives its own object. An object is
  *       never re-entered from within its own body — SQL has no recursion — and a function must not
@@ -110,7 +115,10 @@ import java.util.Optional;
  *       function called from a body is instantiated, opened, and closed like one called anywhere
  *       else.
  *   <li><b>Determinism</b>: the object is only as deterministic as the body of the caller's lambda
- *       expression, so applying the same arguments twice may yield different results.
+ *       expression, so applying the same arguments twice may yield different results. A
+ *       non-deterministic body makes the enclosing call non-deterministic as a whole, and the
+ *       planner treats it like any other non-deterministic call: for example, two identical calls
+ *       are evaluated separately instead of sharing one result.
  * </ul>
  */
 @PublicEvolving
@@ -121,8 +129,14 @@ public interface LambdaInputTypeStrategy extends InputTypeStrategy {
      * empty optional if the argument at that position is not a lambda (or the types cannot be
      * derived).
      *
-     * <p>The types are derived from the (already resolved) sibling arguments available in the given
-     * {@link CallContext}.
+     * <p>The types may only be derived from the arguments that precede the lambda, i.e. from the
+     * arguments at positions {@code 0} to {@code argumentPos - 1} in the order of the function's
+     * signature (named arguments have already been mapped to their declared positions). Only those
+     * arguments are guaranteed to be resolved and described by the given {@link CallContext}: the
+     * Table API resolves the arguments of a call from left to right, so the lambda itself and the
+     * arguments after it are not resolved yet. Whether the call context exposes them is therefore
+     * unspecified, and a strategy must not read them. A signature whose lambda parameter types
+     * depend on another argument places the lambda after that argument.
      *
      * <p>A present list must contain between zero and {@link
      * org.apache.flink.table.types.logical.FunctionType#MAX_CONVERTIBLE_PARAMETER_COUNT} types,

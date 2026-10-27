@@ -20,6 +20,7 @@ package org.apache.flink.table.planner.functions;
 
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
+import org.apache.flink.types.Row;
 
 import java.math.BigDecimal;
 import java.util.stream.Stream;
@@ -29,6 +30,7 @@ import static org.apache.flink.table.api.Expressions.array;
 import static org.apache.flink.table.api.Expressions.ifThenElse;
 import static org.apache.flink.table.api.Expressions.lit;
 import static org.apache.flink.table.api.Expressions.nullOf;
+import static org.apache.flink.table.api.Expressions.row;
 
 /**
  * Tests for the built-in array higher-order functions ({@code ARRAY_TRANSFORM}, {@code
@@ -102,7 +104,9 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 new Integer[] {1, 0, 3},
                                 DataTypes.ARRAY(DataTypes.INT().notNull()))
                         // non-capturing nested higher-order function
-                        .testSqlResult(
+                        .testResult(
+                                array(array(1, 2), array(3))
+                                        .arrayTransform(a -> a.arrayTransform(x -> x.plus(1))),
                                 "ARRAY_TRANSFORM(ARRAY[ARRAY[1, 2], ARRAY[3]], "
                                         + "a -> ARRAY_TRANSFORM(a, x -> x + 1))",
                                 new Integer[][] {new Integer[] {2, 3}, new Integer[] {4}},
@@ -122,8 +126,10 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 "ARRAY_TRANSFORM(f0, x -> x + f4 + f5)",
                                 new Integer[] {1101, 1102, 1103},
                                 DataTypes.ARRAY(DataTypes.INT()))
-                        // a lambda parameter shadows an outer column of the same name (SQL only,
-                        // since the Table API generates lambda parameter names automatically)
+                        // a lambda parameter shadows an outer column of the same name (SQL only:
+                        // the typed Table API methods generate fresh parameter names; the Table
+                        // API spelling with explicit names is pinned by
+                        // HigherOrderFunctionsBatchITCase#testLambdaParameterShadowingOnTableApi)
                         .testSqlResult(
                                 "ARRAY_TRANSFORM(f0, f4 -> f4 + 1)",
                                 new Integer[] {2, 3, 4},
@@ -158,7 +164,12 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 DataTypes.ARRAY(DataTypes.ARRAY(DataTypes.INT()).notNull()))
                         // capture through a non-element-access expression over the enclosing
                         // parameter
-                        .testSqlResult(
+                        .testResult(
+                                array(array(1, 2), array(3))
+                                        .arrayTransform(
+                                                a ->
+                                                        a.arrayTransform(
+                                                                x -> x.plus(a.cardinality()))),
                                 "ARRAY_TRANSFORM(ARRAY[ARRAY[1, 2], ARRAY[3]], "
                                         + "a -> ARRAY_TRANSFORM(a, x -> x + CARDINALITY(a)))",
                                 new Integer[][] {new Integer[] {3, 4}, new Integer[] {4}},
@@ -167,7 +178,17 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                                         .notNull())
                                         .notNull())
                         // a two-level capture threaded through an intermediate lambda
-                        .testSqlResult(
+                        .testResult(
+                                array(array(array(1, 2)))
+                                        .arrayTransform(
+                                                a ->
+                                                        a.arrayTransform(
+                                                                b ->
+                                                                        b.arrayTransform(
+                                                                                x ->
+                                                                                        x.plus(
+                                                                                                a
+                                                                                                        .cardinality())))),
                                 "ARRAY_TRANSFORM(ARRAY[ARRAY[ARRAY[1, 2]]], "
                                         + "a -> ARRAY_TRANSFORM(a, "
                                         + "b -> ARRAY_TRANSFORM(b, x -> x + CARDINALITY(a))))",
@@ -194,7 +215,9 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 },
                                 DataTypes.ARRAY(DataTypes.ARRAY(DataTypes.INT()).notNull()))
                         // an inner parameter shadows the enclosing parameter of the same name (SQL
-                        // only, since the Table API generates lambda parameter names automatically)
+                        // only: the typed Table API methods generate fresh parameter names; the
+                        // Table API spelling with explicit names is pinned by
+                        // HigherOrderFunctionsBatchITCase#testLambdaParameterShadowingOnTableApi)
                         .testSqlResult(
                                 "ARRAY_TRANSFORM(ARRAY[ARRAY[1, 2], ARRAY[3, 4]], "
                                         + "a -> ARRAY_TRANSFORM(a, a -> a + 1))",
@@ -276,16 +299,17 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                         + "(acc, x) -> acc + x)",
                                 100,
                                 DataTypes.INT())
-                        .testSqlResult(
+                        .testResult(
+                                $("f2").arrayReduce(
+                                                lit("").cast(DataTypes.STRING()),
+                                                (acc, x) -> acc.concat(x)),
                                 "ARRAY_REDUCE(f2, CAST('' AS STRING), (acc, x) -> acc || x)",
                                 "abc",
                                 DataTypes.STRING()),
                 // A reducer body whose type is assignable to, but not identical with, the
                 // accumulator type is accepted and converted to the accumulator type: the
                 // accumulator (and therefore the result) type stays the one given by the initial
-                // value. Types are compared with Flink's own type merging, so a DOUBLE body for a
-                // FLOAT accumulator is rejected instead (see
-                // HigherOrderFunctionValidationParityTest).
+                // value. Types are compared with Flink's own type merging.
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_REDUCE)
                         .onFieldsWithData((Object) new Integer[] {1, 2, 3})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
@@ -301,6 +325,13 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                 $("f0").arrayReduce(lit(0L), (acc, x) -> x),
                                 "ARRAY_REDUCE(f0, CAST(0 AS BIGINT), (acc, x) -> x)",
                                 3L,
+                                DataTypes.BIGINT().notNull())
+                        // the accumulator is the first parameter whatever its name, also for
+                        // names whose hash order differs from their declaration order (SQL only:
+                        // the typed Table API methods generate the parameter names)
+                        .testSqlResult(
+                                "ARRAY_REDUCE(f0, CAST(0 AS BIGINT), (x, acc) -> x + acc)",
+                                6L,
                                 DataTypes.BIGINT().notNull()),
                 // A reducer body that can produce NULL makes the result nullable even over a NOT
                 // NULL array and NOT NULL initial accumulator, and the NULL is surfaced at runtime
@@ -308,14 +339,15 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_REDUCE)
                         .onFieldsWithData((Object) new Integer[] {1, 2, 3})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
-                        .testSqlResult(
+                        .testResult(
+                                $("f0").arrayReduce(lit(0), (acc, x) -> nullOf(DataTypes.INT())),
                                 "ARRAY_REDUCE(f0, 0, (acc, x) -> CAST(NULL AS INT))",
                                 null,
                                 DataTypes.INT().nullable())
                         // an initial accumulator wider than the elements keeps its (wider) type;
-                        // the
-                        // reducer body is implicitly widened to the accumulator type
-                        .testSqlResult(
+                        // the reducer body is implicitly widened to the accumulator type
+                        .testResult(
+                                $("f0").arrayReduce(lit(0L), (acc, x) -> acc.plus(x)),
                                 "ARRAY_REDUCE(f0, CAST(0 AS BIGINT), (acc, x) -> acc + x)",
                                 6L,
                                 DataTypes.BIGINT().notNull()),
@@ -358,9 +390,8 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                 // just the type root: the reducer body is checked against the accumulator via
                 // common-type derivation (honoring DECIMAL precision/scale), and codegen casts each
                 // body result back to the accumulator type. Here the body is cast to the
-                // accumulator's DECIMAL(10, 2) so it stays assignable; the rejecting direction (a
-                // wider DECIMAL body into a narrower accumulator) is asserted in the parity
-                // harness.
+                // accumulator's DECIMAL(10, 2) so it stays assignable and the accumulator is not
+                // widened; the widening direction is covered by the "accumulator widening" cases.
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_REDUCE)
                         .onFieldsWithData((Object) new Integer[] {1, 2, 3})
                         .andDataTypes(DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
@@ -374,11 +405,139 @@ class HigherOrderFunctionsITCase extends BuiltInFunctionTestBase {
                                         + "(acc, x) -> CAST(acc + CAST(x AS DECIMAL(5, 0)) "
                                         + "AS DECIMAL(10, 2)))",
                                 new java.math.BigDecimal("6.00"),
-                                DataTypes.DECIMAL(10, 2).notNull()));
+                                DataTypes.DECIMAL(10, 2).notNull()),
+                // A reducer body that is not assignable to the initial value's type widens the
+                // accumulator once, without loss and within the type family, to a type the fold is
+                // stable in: STRING for character strings, DECIMAL(38, s) for decimals, the common
+                // type otherwise, and field by field for constructed types. The initial value is
+                // cast to it and it becomes the result type.
+                TestSetSpec.forFunction(
+                                BuiltInFunctionDefinitions.ARRAY_REDUCE, "accumulator widening")
+                        .onFieldsWithData(
+                                new String[] {"a", "b", "c"},
+                                new BigDecimal[] {new BigDecimal("1.25"), new BigDecimal("2.50")},
+                                new Long[] {1L, 2L, 3L},
+                                new Integer[] {1, 2, 3},
+                                new Integer[] {1, null},
+                                new Double[] {0.5, 1.5})
+                        .andDataTypes(
+                                DataTypes.ARRAY(DataTypes.CHAR(1).notNull()).notNull(),
+                                DataTypes.ARRAY(DataTypes.DECIMAL(3, 2).notNull()).notNull(),
+                                DataTypes.ARRAY(DataTypes.BIGINT().notNull()).notNull(),
+                                DataTypes.ARRAY(DataTypes.INT().notNull()).notNull(),
+                                DataTypes.ARRAY(DataTypes.INT()).notNull(),
+                                DataTypes.ARRAY(DataTypes.DOUBLE().notNull()).notNull())
+                        // '' is a CHAR(0) that every concatenation outgrows
+                        .testResult(
+                                $("f0").arrayReduce(lit(""), (acc, x) -> acc.concat(x)),
+                                "ARRAY_REDUCE(f0, '', (acc, x) -> acc || x)",
+                                "abc",
+                                DataTypes.STRING().notNull())
+                        .testResult(
+                                $("f0").arrayReduce(
+                                                lit("").cast(DataTypes.VARCHAR(1)),
+                                                (acc, x) -> acc.concat(x)),
+                                "ARRAY_REDUCE(f0, CAST('' AS VARCHAR(1)), (acc, x) -> acc || x)",
+                                "abc",
+                                DataTypes.STRING().notNull())
+                        // a reducer that keeps the accumulator keeps its type
+                        .testResult(
+                                $("f0").arrayReduce(lit("zz"), (acc, x) -> acc),
+                                "ARRAY_REDUCE(f0, 'zz', (acc, x) -> acc)",
+                                "zz",
+                                DataTypes.CHAR(2).notNull())
+                        // a decimal sum grows by one digit per addition and settles at the maximum
+                        // precision, keeping the scale
+                        .testResult(
+                                $("f1").arrayReduce(
+                                                lit(new BigDecimal("0.0")),
+                                                (acc, x) -> acc.plus(x)),
+                                "ARRAY_REDUCE(f1, 0.0, (acc, x) -> acc + x)",
+                                new BigDecimal("3.75"),
+                                DataTypes.DECIMAL(38, 2).notNull())
+                        // an integer accumulator becomes a decimal, which stays exact
+                        .testResult(
+                                $("f1").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
+                                "ARRAY_REDUCE(f1, 0, (acc, x) -> acc + x)",
+                                new BigDecimal("3.75"),
+                                DataTypes.DECIMAL(38, 2).notNull())
+                        .testResult(
+                                $("f3").arrayReduce(
+                                                lit(0).cast(DataTypes.DECIMAL(5, 0)),
+                                                (acc, x) ->
+                                                        acc.plus(x).cast(DataTypes.DECIMAL(10, 2))),
+                                "ARRAY_REDUCE(f3, CAST(0 AS DECIMAL(5, 0)), "
+                                        + "(acc, x) -> CAST(acc + x AS DECIMAL(10, 2)))",
+                                new BigDecimal("6.00"),
+                                DataTypes.DECIMAL(38, 2).notNull())
+                        .testResult(
+                                $("f2").arrayReduce(lit(0), (acc, x) -> acc.plus(x)),
+                                "ARRAY_REDUCE(f2, 0, (acc, x) -> acc + x)",
+                                6L,
+                                DataTypes.BIGINT().notNull())
+                        .testResult(
+                                $("f3").arrayReduce(
+                                                lit(0).cast(DataTypes.TINYINT()),
+                                                (acc, x) -> acc.plus(x)),
+                                "ARRAY_REDUCE(f3, CAST(0 AS TINYINT), (acc, x) -> acc + x)",
+                                6,
+                                DataTypes.INT().notNull())
+                        .testResult(
+                                $("f5").arrayReduce(
+                                                lit(0).cast(DataTypes.FLOAT()),
+                                                (acc, x) -> acc.cast(DataTypes.DOUBLE()).plus(x)),
+                                "ARRAY_REDUCE(f5, CAST(0 AS FLOAT), "
+                                        + "(acc, x) -> CAST(acc AS DOUBLE) + x)",
+                                2.0d,
+                                DataTypes.DOUBLE().notNull())
+                        // ARRAY[0] has NOT NULL elements, the reducer's array does not
+                        .testResult(
+                                $("f4").arrayReduce(array(lit(0)), (acc, x) -> array(x)),
+                                "ARRAY_REDUCE(f4, ARRAY[0], (acc, x) -> ARRAY[x])",
+                                new Integer[] {null},
+                                DataTypes.ARRAY(DataTypes.INT()).notNull())
+                        // a row is widened field by field and keeps the field names of the
+                        // initial value
+                        .testResult(
+                                $("f0").arrayReduce(
+                                                row(lit(""), lit(0))
+                                                        .cast(
+                                                                DataTypes.ROW(
+                                                                        DataTypes.FIELD(
+                                                                                "s",
+                                                                                DataTypes.VARCHAR(
+                                                                                        1)),
+                                                                        DataTypes.FIELD(
+                                                                                "n",
+                                                                                DataTypes.INT()))),
+                                                (acc, x) ->
+                                                        row(
+                                                                acc.get("s").concat(x),
+                                                                acc.get("n").plus(1))),
+                                "ARRAY_REDUCE(f0, CAST(ROW('', 0) AS ROW<s VARCHAR(1), n INT>), "
+                                        + "(acc, x) -> ROW(acc.s || x, acc.n + 1))",
+                                Row.of("abc", 3),
+                                DataTypes.ROW(
+                                                DataTypes.FIELD("s", DataTypes.STRING()),
+                                                DataTypes.FIELD("n", DataTypes.INT()))
+                                        .notNull()));
     }
 
     private Stream<TestSetSpec> arrayZipWithTestCases() {
         return Stream.of(
+                // The lambda-object contract allows NULL only for a nullable parameter. Padding
+                // passes NULL even when both arrays have NOT NULL elements, so ARRAY_ZIP_WITH must
+                // declare both lambda parameters nullable.
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_ZIP_WITH)
+                        .onFieldsWithData(new Integer[] {1, 2, 3}, new Integer[] {10, 20})
+                        .andDataTypes(
+                                DataTypes.ARRAY(DataTypes.INT().notNull()).notNull(),
+                                DataTypes.ARRAY(DataTypes.INT().notNull()).notNull())
+                        .testResult(
+                                $("f0").arrayZipWith($("f1"), (x, y) -> x.plus(y)),
+                                "ARRAY_ZIP_WITH(f0, f1, (x, y) -> x + y)",
+                                new Integer[] {11, 22, null},
+                                DataTypes.ARRAY(DataTypes.INT()).notNull()),
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.ARRAY_ZIP_WITH)
                         .onFieldsWithData(
                                 new Integer[] {1, 2, 3}, new Integer[] {10, 20}, null, 100)

@@ -50,6 +50,7 @@ import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlUtil;
 import org.apache.calcite.sql.type.FunctionSqlType;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.validate.SqlLambdaScope;
 
 import javax.annotation.Nullable;
 
@@ -218,16 +219,26 @@ public final class CallBindingCallContext extends AbstractSqlCallContext {
             return Optional.empty();
         }
         final FunctionSqlType functionType = (FunctionSqlType) lambdaType;
+        // The parameter row of the FUNCTION type is not used: Calcite derives it by pairing the
+        // declared parameter names with the values of the lambda scope's hash map, so for names
+        // such as (x, acc) the types come out swapped (SqlLambda.SqlLambdaOperator#deriveType).
+        // Look each declared parameter up by name instead, as SqlToRelConverter#convertLambda does.
+        final Map<String, RelDataType> boundParameterTypes =
+                ((SqlLambdaScope) binding.getValidator().getLambdaScope((SqlLambda) sqlNode))
+                        .getParameterTypes();
         final List<DataTypes.Field> parameterFields =
-                functionType.getParameterTypes().getFieldList().stream()
-                        .map(
-                                field ->
-                                        DataTypes.FIELD(
-                                                field.getName(),
-                                                TypeConversions.fromLogicalToDataType(
-                                                        FlinkTypeFactory.toLogicalType(
-                                                                field.getType()))))
-                        .collect(Collectors.toList());
+                ((SqlLambda) sqlNode)
+                        .getParameters().stream()
+                                .map(SqlNode::toString)
+                                .map(
+                                        name ->
+                                                DataTypes.FIELD(
+                                                        name,
+                                                        TypeConversions.fromLogicalToDataType(
+                                                                FlinkTypeFactory.toLogicalType(
+                                                                        boundParameterTypes.get(
+                                                                                name)))))
+                                .collect(Collectors.toList());
         final DataType returnDataType =
                 TypeConversions.fromLogicalToDataType(
                         FlinkTypeFactory.toLogicalType(functionType.getReturnType()));

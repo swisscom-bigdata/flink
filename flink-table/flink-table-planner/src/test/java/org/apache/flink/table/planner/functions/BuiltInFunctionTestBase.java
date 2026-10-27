@@ -203,6 +203,11 @@ abstract class BuiltInFunctionTestBase {
             return definition;
         }
 
+        /** Whether the specification asserts at least one result rather than only errors. */
+        boolean hasResultItems() {
+            return testItems.stream().anyMatch(ResultTestItem.class::isInstance);
+        }
+
         /**
          * Sets the field data for creating an input table.
          *

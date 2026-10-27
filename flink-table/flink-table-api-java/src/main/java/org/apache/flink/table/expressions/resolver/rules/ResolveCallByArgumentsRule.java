@@ -229,8 +229,8 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
 
         /**
          * Resolves a lambda argument of a higher-order function. The parameter types are bound from
-         * the already resolved sibling arguments and the body is resolved in a scope containing the
-         * parameters.
+         * the already resolved arguments that precede it and the body is resolved in a scope
+         * containing the parameters.
          */
         private ResolvedExpression resolveLambda(
                 String functionName,
@@ -252,19 +252,32 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
                     buildLambdaParameters(names, parameterTypes);
             ResolvedExpression body =
                     resolutionContext.resolveLambdaBody(lambda.getBody(), parameters);
-            // Give the input type strategy a single, monotonic feedback pass: it may refine the
-            // parameter types now that the body type is known (ARRAY_REDUCE widens the accumulator
-            // parameter to nullable once the reducer body is nullable). If it does, re-resolve the
-            // original body with rebuilt local references so the refined types take effect.
-            final Optional<List<DataType>> adjusted =
-                    adjustLambdaParameterTypes(
-                            functionName,
-                            definition,
-                            lambdaPos,
-                            precedingArgs,
-                            parameterTypes,
-                            body.getOutputDataType());
-            if (adjusted.isPresent()) {
+            // Give the input type strategy feedback on the resolved body until it keeps the
+            // parameter types: it may refine them now that the body type is known (ARRAY_REDUCE
+            // widens the accumulator parameter when the reducer body does not fit it, and to
+            // nullable once the reducer body is nullable). If it does, re-resolve the original body
+            // with rebuilt local references so the refined types take effect.
+            for (int adjustments = 0; ; adjustments++) {
+                final Optional<List<DataType>> adjusted =
+                        adjustLambdaParameterTypes(
+                                functionName,
+                                definition,
+                                lambdaPos,
+                                precedingArgs,
+                                parameterTypes,
+                                body.getOutputDataType());
+                if (!adjusted.isPresent()) {
+                    break;
+                }
+                if (adjustments
+                        == RefinableLambdaInputTypeStrategy.MAX_PARAMETER_TYPE_ADJUSTMENTS) {
+                    throw new TableException(
+                            String.format(
+                                    "The lambda parameter types of function '%s' at position %d "
+                                            + "did not reach a fixed point after %d adjustments. "
+                                            + "This is a bug, please file an issue.",
+                                    functionName, lambdaPos, adjustments));
+                }
                 parameterTypes = adjusted.get();
                 parameters = buildLambdaParameters(names, parameterTypes);
                 body = resolutionContext.resolveLambdaBody(lambda.getBody(), parameters);
@@ -441,6 +454,20 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
                     LambdaTypeValidation.checkDerivedParameterTypes(parameterTypes.get());
                     return parameterTypes.get();
                 }
+                // The lambda is not necessarily at fault: a preceding argument of the wrong type (a
+                // non-ARRAY first argument of ARRAY_TRANSFORM) leaves nothing to derive the
+                // parameter types from. Report the function's signature, as SQL does, rather than
+                // claiming that the function does not accept a lambda.
+                throw TypeInferenceUtil.createInvalidInputException(
+                        inference,
+                        callContext,
+                        new ValidationException(
+                                String.format(
+                                        "Either the function does not declare a lambda argument "
+                                                + "at position %d, or the lambda parameter types "
+                                                + "cannot be derived from the preceding argument "
+                                                + "types %s.",
+                                        lambdaPos, callContext.getArgumentDataTypes())));
             }
             throw new ValidationException(
                     String.format(
@@ -449,8 +476,8 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
         }
 
         /**
-         * Gives the function's {@link RefinableLambdaInputTypeStrategy} a single feedback pass to
-         * refine the lambda parameter types now that the body has been resolved once (see {@link
+         * Asks the function's {@link RefinableLambdaInputTypeStrategy} to refine the lambda
+         * parameter types now that the body has been resolved with the current ones (see {@link
          * RefinableLambdaInputTypeStrategy#adjustLambdaParameterTypes}). Returns an empty optional
          * when the strategy keeps the current types or does not support refinement at all. The
          * refinement is internal: a user-supplied {@link LambdaInputTypeStrategy} declares its
@@ -485,20 +512,9 @@ final class ResolveCallByArgumentsRule implements ResolverRule {
                                     currentParameterTypes,
                                     lambdaResultType);
             adjusted.ifPresent(
-                    types -> {
-                        if (types.size() != currentParameterTypes.size()) {
-                            throw new ValidationException(
-                                    String.format(
-                                            "Invalid input type strategy of function '%s'. The "
-                                                    + "refined lambda parameter types at position "
-                                                    + "%d must have %d parameter(s) but %d were "
-                                                    + "returned.",
-                                            functionName,
-                                            lambdaPos,
-                                            currentParameterTypes.size(),
-                                            types.size()));
-                        }
-                    });
+                    types ->
+                            LambdaTypeValidation.checkRefinedParameterTypes(
+                                    functionName, lambdaPos, currentParameterTypes, types));
             return adjusted;
         }
 

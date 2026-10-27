@@ -19,12 +19,13 @@
 package org.apache.flink.table.runtime.functions;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.api.common.functions.DefaultOpenContext;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFunction;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.table.functions.SpecializedFunction.ExpressionEvaluator;
 import org.apache.flink.table.runtime.generated.GeneratedFunction;
+import org.apache.flink.table.runtime.operators.metrics.UdfMetrics;
 import org.apache.flink.util.Preconditions;
 
 import java.lang.invoke.MethodHandle;
@@ -53,7 +54,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     public MethodHandle open(FunctionContext context) {
-        final RichFunction openedInstance = openInstance(context);
+        final RichFunction openedInstance = openInstance(context, new UdfMetrics[0]);
         try {
             final MethodHandles.Lookup publicLookup = MethodHandles.publicLookup();
             return publicLookup
@@ -77,9 +78,15 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
      * method, so that applying the lambda does not pay {@link
      * MethodHandle#invokeWithArguments(Object...)}'s per-application boxing and adaptation. It is
      * only callable when the evaluator was generated for a lambda body.
+     *
+     * @param context the context of the enclosing generated class, with which the functions called
+     *     from the body are opened as well
+     * @param udfMetrics the enclosing generated class's metrics handles for the user-defined
+     *     functions called from the body, in the order the body requested them
      */
-    public LambdaFunctionFactory openLambdaFactory(FunctionContext context) {
-        final RichFunction openedInstance = openInstance(context);
+    public LambdaFunctionFactory openLambdaFactory(
+            FunctionContext context, UdfMetrics[] udfMetrics) {
+        final RichFunction openedInstance = openInstance(context, udfMetrics);
         if (!(openedInstance instanceof LambdaFunctionFactory)) {
             throw new TableException(
                     String.format(
@@ -89,14 +96,14 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         return (LambdaFunctionFactory) openedInstance;
     }
 
-    private RichFunction openInstance(FunctionContext context) {
+    private RichFunction openInstance(FunctionContext context, UdfMetrics[] udfMetrics) {
         Preconditions.checkState(
                 instance == null,
                 "Expression evaluator for '%s' has already been opened.",
                 expressionSummary);
         try {
             instance = generatedClass.newInstance(context.getUserCodeClassLoader());
-            instance.open(DefaultOpenContext.INSTANCE);
+            instance.open(new EvaluatorOpenContext(context, udfMetrics));
             return instance;
         } catch (Exception e) {
             throw new TableException(
@@ -127,5 +134,55 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         return String.format(
                 "ExpressionEvaluator{handleSignature=%s, expression=%s}",
                 methodType, expressionSummary);
+    }
+
+    /**
+     * Returns the {@link FunctionContext} for opening the functions that a generated evaluator
+     * class calls.
+     *
+     * <p>An evaluator is not an operator and has no runtime context of its own. It passes on the
+     * context it was opened with, so that a function called from a lambda body sees the same job
+     * parameters, task info, metric group and distributed cache as one called directly in the
+     * enclosing operator.
+     */
+    public static FunctionContext functionContextOf(
+            OpenContext openContext, ClassLoader classLoader) {
+        if (openContext instanceof EvaluatorOpenContext) {
+            return ((EvaluatorOpenContext) openContext).functionContext;
+        }
+        return new FunctionContext(null, classLoader, openContext);
+    }
+
+    /**
+     * Returns the metrics handle of a user-defined function that a generated evaluator class calls.
+     *
+     * <p>The handle is the one of the enclosing generated class, so that every call site of a
+     * function in an operator feeds a single histogram and counter, whether it is inside a lambda
+     * body or not. Registering a second handle under the same name would collide in the metric
+     * group and go unreported. A handle that the enclosing class did not pass on, which only
+     * happens for an evaluator opened through {@link #open(FunctionContext)}, is registered in the
+     * context's metric group instead.
+     */
+    public static UdfMetrics udfMetricsOf(
+            OpenContext openContext, int index, String udfName, int sampleInterval) {
+        if (openContext instanceof EvaluatorOpenContext) {
+            final UdfMetrics[] udfMetrics = ((EvaluatorOpenContext) openContext).udfMetrics;
+            if (index < udfMetrics.length) {
+                return udfMetrics[index];
+            }
+        }
+        return UdfMetrics.register(
+                functionContextOf(openContext, null).getMetricGroup(), udfName, sampleInterval);
+    }
+
+    /** The {@link OpenContext} of a generated evaluator class. */
+    private static final class EvaluatorOpenContext implements OpenContext {
+        private final FunctionContext functionContext;
+        private final UdfMetrics[] udfMetrics;
+
+        private EvaluatorOpenContext(FunctionContext functionContext, UdfMetrics[] udfMetrics) {
+            this.functionContext = Preconditions.checkNotNull(functionContext);
+            this.udfMetrics = Preconditions.checkNotNull(udfMetrics);
+        }
     }
 }

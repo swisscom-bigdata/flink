@@ -37,7 +37,6 @@ import org.apache.flink.table.expressions.TypeLiteralExpression;
 import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.factories.ModelProviderFactory;
-import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.ml.ModelProvider;
 import org.apache.flink.table.module.Module;
 import org.apache.flink.table.planner.calcite.FlinkContext;
@@ -62,7 +61,6 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexLambdaRef;
 import org.apache.calcite.rex.RexNode;
-import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.util.DateString;
@@ -95,16 +93,6 @@ import static org.apache.flink.util.OptionalUtils.firstPresent;
 /** Visit expression to generator {@link RexNode}. */
 public class ExpressionConverter implements ExpressionVisitor<RexNode> {
 
-    /**
-     * Built-in higher-order functions and their corresponding {@link SqlOperator}. Their lambda
-     * argument requires dedicated conversion, see {@link #visitHigherOrderFunction}.
-     */
-    private static final Map<FunctionDefinition, SqlOperator> HIGHER_ORDER_FUNCTION_OPERATORS =
-            new HashMap<>();
-
-    static {
-    }
-
     private final RelBuilder relBuilder;
     private final FlinkTypeFactory typeFactory;
     private final DataTypeFactory dataTypeFactory;
@@ -135,18 +123,14 @@ public class ExpressionConverter implements ExpressionVisitor<RexNode> {
 
     @Override
     public RexNode visit(CallExpression call) {
-        final SqlOperator higherOrderOperator =
-                HIGHER_ORDER_FUNCTION_OPERATORS.get(call.getFunctionDefinition());
-        if (higherOrderOperator != null) {
-            return visitHigherOrderFunction(call, higherOrderOperator);
-        }
         boolean isBatchMode = unwrapContext(relBuilder).isBatchMode();
         for (CallExpressionConvertRule rule : getFunctionConvertChain(isBatchMode)) {
             Optional<RexNode> converted = rule.convert(call, newFunctionContext());
             if (converted.isPresent()) {
                 final RexNode result = converted.get();
-                // A user-defined higher-order function may carry a lambda that closes over outer
-                // columns; lift those captures out of the (closed) lambda (a no-op otherwise).
+                // A lambda argument may close over outer columns. Lift those captures out of the
+                // (closed) lambda into additional lambda parameters and trailing call operands so
+                // that column trimming keeps them (a no-op for a call without a lambda).
                 if (result instanceof RexCall) {
                     return HigherOrderFunctionUtil.liftCaptures(
                             (RexCall) result, relBuilder.getRexBuilder());
@@ -328,31 +312,6 @@ public class ExpressionConverter implements ExpressionVisitor<RexNode> {
             throw new UnsupportedOperationException(
                     other.getClass().getSimpleName() + ":" + other.toString());
         }
-    }
-
-    /**
-     * Converts a call to a built-in higher-order function (with a lambda argument) into a {@link
-     * RexNode}.
-     *
-     * <p>The result type is taken from the already resolved {@link CallExpression} rather than
-     * being re-derived from the operands: at the {@link RexNode} level a {@link
-     * org.apache.calcite.rex.RexLambda} carries only its body type (not the {@code FUNCTION} type
-     * that the operator's return-type inference expects during SQL validation).
-     */
-    private RexNode visitHigherOrderFunction(CallExpression call, SqlOperator operator) {
-        final List<RexNode> operands =
-                call.getChildren().stream()
-                        .map(child -> child.accept(this))
-                        .collect(Collectors.toList());
-        final RelDataType returnType =
-                typeFactory.createFieldTypeFromLogicalType(
-                        fromDataTypeToLogicalType(call.getOutputDataType()));
-        final RexCall rexCall =
-                (RexCall) relBuilder.getRexBuilder().makeCall(returnType, operator, operands);
-        // A lambda body may close over outer columns. Lift those captures out of the (closed)
-        // lambda into additional lambda parameters and trailing call operands so that column
-        // trimming keeps them; the runtime binds the parameters to the operand values.
-        return HigherOrderFunctionUtil.liftCaptures(rexCall, relBuilder.getRexBuilder());
     }
 
     /**

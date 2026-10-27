@@ -18,6 +18,8 @@
 
 package org.apache.flink.table.planner.calcite;
 
+import org.apache.flink.table.planner.functions.utils.SqlValidatorUtils;
+
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.RelDataTypeField;
@@ -73,9 +75,20 @@ public class FlinkSqlNameMatcher implements SqlNameMatcher {
      *
      * <p>If the fields type is NOT NULL, but the enclosing ROW is nullable we still can produce
      * nulls.
+     *
+     * <p>A field of a lambda parameter that is not bound yet, such as {@code i.qty} in {@code
+     * ARRAY_TRANSFORM(orders, o -> ARRAY_FILTER(o.items, i -> i.qty > 0))}, is the unbound
+     * placeholder itself. The body of a nested lambda is type-derived once before the operand
+     * checker of its call binds the parameter (see {@link
+     * SqlValidatorUtils#isUnresolvedLambdaParameter}), and the placeholder has no fields to look
+     * up. The field is resolved, or reported as unknown, when the body is re-validated against the
+     * bound parameter type.
      */
     @Override
     public RelDataTypeField field(RelDataType rowType, String fieldName) {
+        if (SqlValidatorUtils.isUnresolvedLambdaParameter(rowType)) {
+            return new RelDataTypeFieldImpl(fieldName, 0, rowType);
+        }
         RelDataTypeField field = baseMatcher.field(rowType, fieldName);
         if (field != null && rowType.isNullable() && !field.getType().isNullable()) {
             RelDataType typeWithNullability =

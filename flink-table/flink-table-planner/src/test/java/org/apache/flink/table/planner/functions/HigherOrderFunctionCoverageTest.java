@@ -55,6 +55,7 @@ class HigherOrderFunctionCoverageTest {
         final Set<String> tested =
                 new HigherOrderFunctionsITCase()
                         .getTestSetSpecs()
+                        .filter(BuiltInFunctionTestBase.TestSetSpec::hasResultItems)
                         .map(BuiltInFunctionTestBase.TestSetSpec::getDefinition)
                         .filter(Objects::nonNull)
                         .map(BuiltInFunctionDefinition::getName)
@@ -63,8 +64,9 @@ class HigherOrderFunctionCoverageTest {
         assertThat(missingFrom(tested))
                 .as(
                         "Every built-in function that declares a lambda argument needs execution "
-                                + "cases in %s, declared with TestSetSpec.forFunction(...) so that "
-                                + "the function under test is recorded.",
+                                + "cases in %s: a TestSetSpec.forFunction(...), so that the "
+                                + "function under test is recorded, with at least one result "
+                                + "assertion rather than only error assertions.",
                         HigherOrderFunctionsITCase.class.getSimpleName())
                 .isEmpty();
     }

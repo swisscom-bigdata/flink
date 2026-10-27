@@ -332,7 +332,9 @@ public class BridgingSqlFunction extends SqlFunction {
     /**
      * Builds a {@link CallContext} from the given {@link RexCall} for this function. Wraps the call
      * in an {@link OperatorBindingCallContext} so consumers (trait resolution, codegen, etc.) read
-     * scalar arguments through the same coercion path as validation.
+     * scalar arguments through the same coercion path as validation. The context exposes lambda
+     * bodies (see {@link CallContext#getLambdaArgument(int)}): it serves a converted call, not type
+     * inference.
      */
     public CallContext toCallContext(RexCall call) {
         return toCallContext(call, null, null, null, null);
@@ -370,7 +372,8 @@ public class BridgingSqlFunction extends SqlFunction {
                 inputTimeColumns,
                 inputChangelogModes,
                 outputChangelogMode,
-                inputUpsertKeys);
+                inputUpsertKeys,
+                true);
     }
 
     /**

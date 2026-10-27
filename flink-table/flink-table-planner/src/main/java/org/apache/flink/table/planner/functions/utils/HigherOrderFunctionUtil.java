@@ -86,12 +86,13 @@ import java.util.stream.Collectors;
 public final class HigherOrderFunctionUtil {
 
     /**
-     * Reserved name prefix of a lifted capture parameter (see {@link #captureName}). The suffix
-     * {@code $} cannot appear in an unquoted SQL identifier, and lambda parameter names beginning
-     * with this prefix are rejected during validation (see {@code
-     * SqlValidatorImpl#validateLambda}), so a lifted capture parameter can never collide with a
-     * user-chosen lambda parameter. Code generation relies on this to distinguish trailing capture
-     * operands from a function's declared arguments (see {@code BridgingSqlFunctionCallGen}).
+     * Reserved name prefix of a lifted capture parameter (see {@link #captureName}). The name only
+     * keeps plans readable: every stage recognizes a lifted parameter by its index (see {@link
+     * #CAPTURE_PARAM_INDEX_BASE} and {@link #isCaptureParameter}), never by its name. The character
+     * {@code $} cannot appear in an unquoted SQL identifier, and SQL lambda parameter names that
+     * begin with this prefix are rejected during validation (see {@code
+     * FlinkCalciteSqlValidator#validateLambda}), so that a plan never shows a SQL lambda's own
+     * parameter under a capture's name.
      */
     public static final String CAPTURE_PARAM_PREFIX = "cap$";
 
@@ -110,8 +111,9 @@ public final class HigherOrderFunctionUtil {
      * lets every stage recover which parameters are lifted from the lambda alone.
      *
      * <p>The base is far above any reachable parameter count: a lambda argument is passed to {@code
-     * eval()} as a {@code FunctionData1} / {@code FunctionData2} / {@code FunctionData3}, so a
-     * function can declare at most three user-visible parameters.
+     * eval()} as a {@code FunctionN} or {@code FunctionDataN}, so a lambda has at most {@link
+     * org.apache.flink.table.types.logical.FunctionType#MAX_CONVERTIBLE_PARAMETER_COUNT}
+     * user-visible parameters.
      */
     public static final int CAPTURE_PARAM_INDEX_BASE = 1_000_000;
 
@@ -163,9 +165,10 @@ public final class HigherOrderFunctionUtil {
      * <p>A call may carry more than one lambda operand (a user-defined function that declares
      * several lambda arguments). Each lambda is lifted independently; its captured free variables
      * are appended as trailing call operands after the regular operands, in lambda-operand
-     * (left-to-right) order. Every lambda's own {@code cap$}-named parameters record how many of
-     * the trailing operands belong to it, so code generation ({@code BridgingSqlFunctionCallGen})
-     * can partition the trailing operands back to the owning lambda.
+     * (left-to-right) order. The capture parameters each lambda gains, recognized by their index
+     * (see {@link #isCaptureParameter}), record how many of the trailing operands belong to it, so
+     * code generation ({@code BridgingSqlFunctionCallGen}) can partition the trailing operands back
+     * to the owning lambda.
      */
     public static RexCall liftCaptures(RexCall call, RexBuilder rexBuilder) {
         final List<RexNode> operands = call.getOperands();

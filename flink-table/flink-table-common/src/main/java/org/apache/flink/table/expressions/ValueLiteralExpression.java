@@ -30,6 +30,7 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeFamily;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.YearMonthIntervalType;
+import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
 import org.apache.flink.table.types.utils.ValueDataTypeConverter;
 import org.apache.flink.table.utils.DateTimeUtils;
 import org.apache.flink.table.utils.EncodingUtils;
@@ -389,6 +390,15 @@ public final class ValueLiteralExpression implements ResolvedExpression {
 
     private static void validateValueDataType(Object value, DataType dataType) {
         final LogicalType logicalType = dataType.getLogicalType();
+        if (LogicalTypeChecks.hasFunctionType(logicalType)) {
+            throw new ValidationException(
+                    String.format(
+                            "Invalid data type '%s' for a literal. The FUNCTION data type is a "
+                                    + "helper type for lambda arguments of higher-order functions. "
+                                    + "It cannot be materialized, so pass a lambda expression "
+                                    + "instead.",
+                            dataType));
+        }
         if (value == null) {
             if (!logicalType.isNullable()) {
                 throw new ValidationException(

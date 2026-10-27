@@ -79,7 +79,8 @@ class BridgingSqlFunctionCallGen(call: RexCall, rexProgram: RexProgram) extends 
         declaredCall,
         rexProgram,
         Collections.emptyList()),
-      declaredCall.getType)
+      declaredCall.getType,
+      /* lambdaBodiesAvailable */ true)
 
     // create the final UDF for runtime
     val evaluatorFactory =

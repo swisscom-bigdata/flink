@@ -995,7 +995,7 @@ higherorder:
 
       Returns `NULL` if `array` is `NULL`. An empty array returns an empty array. A `NULL` element is passed to the lambda like any other element.
 
-      E.g., `ARRAY_TRANSFORM(ARRAY[1, 2, 3], x -> x * 10)` returns `[10, 20, 30]`; `ARRAY_TRANSFORM(ARRAY[1, 2], x -> x + offset)` adds the value of the column `offset` to each element.
+      E.g., `ARRAY_TRANSFORM(ARRAY[1, 2, 3], x -> x * 10)` returns `[10, 20, 30]`; `ARRAY_TRANSFORM(ARRAY[1, 2], x -> x + base)` adds the value of the column `base` to each element.
   - sql: ARRAY_FILTER(array, element -> predicate)
     table: array.arrayFilter(element -> predicate)
     description: |
@@ -1007,13 +1007,13 @@ higherorder:
   - sql: ARRAY_REDUCE(array, initial_value, (acc, element) -> expression)
     table: array.arrayReduce(initialValue, (acc, element) -> expression)
     description: |
-      Left fold over `array`, i.e. `(ARRAY<E>, A, (A, E) -> A)` returns `A`. Starting from `initial_value`, the merge lambda is applied to each element in order and the final accumulator is returned. The first lambda parameter is the accumulator (its type `A` is taken from `initial_value`), the second one is the element; the result of the lambda becomes the accumulator for the next element. The result type of the call is the accumulator type `A`.
+      Left fold over `array`, i.e. `(ARRAY<E>, A, (A, E) -> A)` returns `A`. Starting from `initial_value`, the merge lambda is applied to each element in order and the final accumulator is returned. The first lambda parameter is the accumulator of type `A`, the second one is the element; the result of the lambda becomes the accumulator for the next element. The result type of the call is the accumulator type `A`.
 
-      The lambda body must be assignable to `A`: implicit widening (e.g. `INT` to `BIGINT`) is allowed, but an incompatible or narrowing result type fails at validation. The result is `NULL`-able if `array`, `initial_value` or the lambda body is `NULL`-able. When the lambda body can produce `NULL`, the accumulator is inferred as `NULL`-able, so a reducer that branches on `acc IS NULL` observes an accumulator that an earlier iteration set to `NULL`.
+      `A` is the type of `initial_value` if the result of the lambda is assignable to it; implicit widening (e.g. `INT` to `BIGINT`) is allowed. Otherwise the accumulator is widened once, without loss and within the same type family, so that it can hold the result: to `STRING` for character strings, to `BYTES` for binary strings, to `DECIMAL(38, s)` for decimals (also for an integer `initial_value` and a decimal result), to the common type of both for other types, and field by field for constructed types such as arrays and rows. `initial_value` is then cast to it. If the result still does not fit, e.g. because it is in another type family (a `DOUBLE` result for an `INT` accumulator) or a decimal result would lose scale, validation fails with a hint which value to cast. The result is `NULL`-able if `array`, `initial_value` or the lambda body is `NULL`-able. When the lambda body can produce `NULL`, the accumulator is inferred as `NULL`-able, so a reducer that branches on `acc IS NULL` observes an accumulator that an earlier iteration set to `NULL`.
 
       Returns `NULL` if `array` is `NULL`. For an empty array the initial accumulator is returned. `NULL` elements are passed to the merge lambda.
 
-      E.g., `ARRAY_REDUCE(ARRAY[1, 2, 3], 0, (acc, x) -> acc + x)` returns `6`; `ARRAY_REDUCE(ARRAY['a', 'b', 'c'], '', (acc, x) -> acc || x)` returns `'abc'`.
+      E.g., `ARRAY_REDUCE(ARRAY[1, 2, 3], 0, (acc, x) -> acc + x)` returns `6`; `ARRAY_REDUCE(ARRAY['a', 'b', 'c'], '', (acc, x) -> acc || x)` returns `'abc'` of type `STRING`; `ARRAY_REDUCE(ARRAY[1.25, 2.50], 0, (acc, x) -> acc + x)` returns `3.75` of type `DECIMAL(38, 2)`.
   - sql: ARRAY_ZIP_WITH(array1, array2, (element1, element2) -> expression)
     table: array1.arrayZipWith(array2, (element1, element2) -> expression)
     description: |

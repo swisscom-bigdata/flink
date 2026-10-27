@@ -100,7 +100,10 @@ public final class TypeInferenceReturnInference implements SqlReturnTypeInferenc
                     expectedOutputType,
                     typeInference.getStaticArguments().orElse(null));
         } else {
-            return new OperatorBindingCallContext(dataTypeFactory, definition, binding, null);
+            // Also reached when the planner re-derives the type of a converted call, whose lambdas
+            // may already be closed; the body is still withheld, as for any type inference.
+            return new OperatorBindingCallContext(
+                    dataTypeFactory, definition, binding, null, /* lambdaBodiesAvailable */ false);
         }
     }
 

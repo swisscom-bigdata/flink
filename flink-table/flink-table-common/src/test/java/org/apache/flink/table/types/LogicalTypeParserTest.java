@@ -321,6 +321,20 @@ public class LogicalTypeParserTest {
                 TestSpec.forString("FUNCTION(3)").expectType(new FunctionType(3)),
                 // the wrapper nullability is canonicalized away
                 TestSpec.forString("FUNCTION(1) NOT NULL").expectType(new FunctionType(1)),
+                // FUNCTION is a keyword, so a field or a user-defined type named "function" must
+                // be quoted, as for every other type keyword
+                TestSpec.forString("ROW<`function` INT>")
+                        .expectType(
+                                new RowType(
+                                        Collections.singletonList(
+                                                new RowType.RowField("function", new IntType())))),
+                TestSpec.forString("cat.db.`function`")
+                        .expectType(
+                                new UnresolvedUserDefinedType(
+                                        UnresolvedIdentifier.of("cat", "db", "function"))),
+                TestSpec.forString("`function`")
+                        .expectType(
+                                new UnresolvedUserDefinedType(UnresolvedIdentifier.of("function"))),
 
                 // error message testing
 
@@ -338,7 +352,12 @@ public class LogicalTypeParserTest {
                 // the parameter count is required; a bare FUNCTION names no particular type
                 TestSpec.forString("FUNCTION").expectErrorMessage("Unexpected end"),
                 TestSpec.forString("FUNCTION NOT NULL")
-                        .expectErrorMessage("<BEGIN_PARAMETER> expected"));
+                        .expectErrorMessage("<BEGIN_PARAMETER> expected"),
+                // an unquoted "function" is the keyword, matched case-insensitively
+                TestSpec.forString("ROW<function INT>")
+                        .expectErrorMessage("<IDENTIFIER> expected but was <KEYWORD>"),
+                TestSpec.forString("cat.db.function")
+                        .expectErrorMessage("<IDENTIFIER> expected but was <KEYWORD>"));
     }
 
     @ParameterizedTest(name = "{index}: {0}")

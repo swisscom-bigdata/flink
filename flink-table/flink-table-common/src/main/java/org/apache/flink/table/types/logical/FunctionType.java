@@ -97,9 +97,9 @@ public final class FunctionType extends LogicalType {
     private static final boolean CANONICAL_NULLABILITY = true;
 
     /**
-     * The maximum number of parameters for which a runtime conversion class exists. Function types
-     * with more (or zero) parameters can still be constructed and planned, but their value cannot
-     * be handed to a user-defined function.
+     * The maximum number of parameters for which a runtime conversion class exists. A function type
+     * with more parameters occurs only internally, for a lambda that carries lifted captures (see
+     * {@link #ofUncheckedArity(int)}), and its value cannot be handed to a user-defined function.
      *
      * @see #getDefaultConversion()
      */
@@ -107,9 +107,11 @@ public final class FunctionType extends LogicalType {
 
     // The conversion class of a lambda is its arity's functional interface, indexed by arity. The
     // FunctionN family is the conversion class at every arity, so that one naming scheme covers the
-    // whole range: java.util.function has no zero- or four-argument type, so any scheme built on
-    // the JDK types alone would have to break uniformity exactly where a user is least able to
-    // guess the name. Raising the bound is a matter of adding the next FunctionN and FunctionDataN
+    // whole range: java.util.function has no interface with more than two parameters, and its
+    // zero-parameter Supplier names its method get() rather than apply() (see below), so any scheme
+    // built on the JDK types alone would have to break uniformity exactly where a user is least
+    // able to guess the name. Raising the bound is a matter of adding the next FunctionN and
+    // FunctionDataN
     // and extending these tables.
     private static final Class<?>[] CONVERSIONS = {
         Function0.class, Function1.class, Function2.class, Function3.class, Function4.class,
@@ -212,6 +214,11 @@ public final class FunctionType extends LogicalType {
      * The internal-data conversion class for a lambda of the given arity, falling back to the
      * one-parameter handle for an arity that has no functional interface (a lambda carrying lifted
      * captures).
+     *
+     * <p>Like the external fallback of {@link #getDefaultConversion()}, the fallback is only a
+     * placeholder, because every logical type must name a conversion class. It never reaches a
+     * function: the {@code FUNCTION} type that a function's type inference and {@code eval()} see
+     * excludes the lifted captures, so its arity always has a functional interface.
      */
     @Internal
     public static Class<?> internalConversionClass(int parameterCount) {

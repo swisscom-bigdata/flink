@@ -35,6 +35,7 @@ import org.apache.flink.table.planner.catalog.CatalogSchemaTable;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.utils.HigherOrderFunctionUtil;
 import org.apache.flink.table.planner.functions.utils.ScalarSqlFunction;
+import org.apache.flink.table.planner.functions.utils.SqlValidatorUtils;
 import org.apache.flink.table.planner.plan.FlinkCalciteCatalogReader;
 import org.apache.flink.table.planner.plan.utils.FlinkRexUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
@@ -74,6 +75,7 @@ import org.apache.calcite.sql.SqlSnapshot;
 import org.apache.calcite.sql.SqlTableFunction;
 import org.apache.calcite.sql.SqlUtil;
 import org.apache.calcite.sql.SqlWindowTableFunction;
+import org.apache.calcite.sql.SqlWithItem;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.type.SqlOperandMetadata;
 import org.apache.calcite.sql.type.SqlOperandTypeChecker;
@@ -91,6 +93,7 @@ import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorCatalogReader;
 import org.apache.calcite.sql.validate.SqlValidatorNamespace;
 import org.apache.calcite.sql.validate.SqlValidatorScope;
+import org.apache.calcite.sql.validate.SqlValidatorUtil;
 import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.util.Static;
@@ -101,6 +104,7 @@ import org.checkerframework.checker.nullness.qual.PolyNull;
 import java.math.BigDecimal;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -202,13 +206,13 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
 
     @Override
     public void validateLambda(SqlLambda lambdaExpr) {
-        // Reject lambda parameter names that collide with the reserved prefix used for lifted
-        // capture parameters (see HigherOrderFunctionUtil#CAPTURE_PARAM_PREFIX). Otherwise a
-        // user-chosen name such as "cap$x" would be miscounted as a lifted capture during code
-        // generation and drop a real declared operand from the call. Duplicate names are rejected
-        // for a related reason: the body binds parameters by name, and the lambda scope keys them
-        // by name, so a duplicate would collapse into a single parameter and the derived FUNCTION
-        // type would disagree with the declared arity (an internal error later on).
+        // Reject lambda parameter names that begin with the prefix reserved for lifted capture
+        // parameters (see HigherOrderFunctionUtil#CAPTURE_PARAM_PREFIX). The planner recognizes a
+        // capture by its index, not its name, so this only keeps plans readable: a user-chosen
+        // name such as "cap$x" would look like a lifted capture there. Duplicate names are
+        // rejected for a different reason: the body binds parameters by name, and the lambda scope
+        // keys them by name, so a duplicate would collapse into a single parameter and the derived
+        // FUNCTION type would disagree with the declared arity (an internal error later on).
         final Set<String> declared = new HashSet<>();
         for (SqlNode parameter : lambdaExpr.getParameters()) {
             final String name = ((SqlIdentifier) parameter).getSimple();
@@ -292,6 +296,42 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
             return;
         }
         super.validateCall(call, scope);
+    }
+
+    /**
+     * Defers a field access in a lambda body whose record is derived from a lambda parameter that
+     * is not bound yet, such as {@code o.items[1].price} in {@code ARRAY_TRANSFORM(a, x ->
+     * ARRAY_TRANSFORM(orders, o -> o.items[1].price + x))}.
+     *
+     * <p>The body of a nested lambda, and of a lambda in a stand-alone SQL expression, is
+     * type-derived once before the operand checker of its call binds the parameters (see {@link
+     * SqlValidatorUtils#isUnresolvedLambdaParameter}). The record is then the unbound placeholder,
+     * which Calcite's {@code DOT} operator rejects with "Incompatible types" because it has no
+     * fields. The field access is the placeholder as well until the body is re-validated against
+     * the bound parameter types. A field of a parameter itself, {@code o.items}, is an identifier
+     * rather than a {@code DOT} call and is deferred by {@link FlinkSqlNameMatcher#field}.
+     */
+    @Override
+    public RelDataType deriveType(SqlValidatorScope scope, SqlNode expr) {
+        if (expr.getKind() == SqlKind.DOT && isInLambdaBody(scope)) {
+            final RelDataType recordType = super.deriveType(scope, ((SqlCall) expr).operand(0));
+            if (SqlValidatorUtils.isUnresolvedLambdaParameter(recordType)) {
+                setValidatedNodeType(expr, recordType);
+                return recordType;
+            }
+        }
+        return super.deriveType(scope, expr);
+    }
+
+    private static boolean isInLambdaBody(SqlValidatorScope scope) {
+        for (SqlValidatorScope current = scope;
+                current instanceof DelegatingScope;
+                current = ((DelegatingScope) current).getParent()) {
+            if (current instanceof SqlLambdaScope) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -384,10 +424,16 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
         if (construct != null) {
             final String captured = findLambdaParameterReference(call, lambdaParameters);
             if (captured != null) {
+                // An unqualified name is not resolved against the subquery, so a subquery with a
+                // column of a lambda parameter's name is rejected too; its message therefore
+                // suggests qualifying the column or renaming the parameter.
                 throw newValidationError(
                         call,
-                        EXTRA_RESOURCE.unsupportedOverLambdaParameterInLambdaBody(
-                                construct, captured));
+                        isQuery
+                                ? EXTRA_RESOURCE.unsupportedSubqueryOverLambdaParameterInLambdaBody(
+                                        captured)
+                                : EXTRA_RESOURCE.unsupportedOverLambdaParameterInLambdaBody(
+                                        construct, captured));
             }
         }
         if (isQuery) {
@@ -405,21 +451,58 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
      * null if it references none. An identifier references the parameter its first component names,
      * e.g. {@code r.amount} references {@code r}. A lambda nested below {@code node} shadows the
      * parameters it redeclares, and its own parameters do not count: they are bound within it.
+     *
+     * <p>The check is syntactic and must never miss a real reference, so inside a sub-query it
+     * follows the sub-query's own declarations only where that is unambiguous:
+     *
+     * <ul>
+     *   <li>A name that is only declared is not a reference: the alias and the column list of
+     *       {@code AS}, the name and the column list of a {@code WITH} item, and a table name in
+     *       {@code FROM}.
+     *   <li>A qualified name {@code q.c} is not a reference if {@code q} is a table alias of an
+     *       enclosing {@code SELECT} within {@code node}. The validator and the converter resolve
+     *       it innermost scope first, i.e. against that table, not against the lambda parameter.
+     *   <li>Any other name whose first component is a parameter is a reference. That includes an
+     *       unqualified name that is also a column of the sub-query: inside a lambda body such a
+     *       name always means the parameter, which spares the reader from resolving it by scope.
+     * </ul>
      */
     private static @Nullable String findLambdaParameterReference(
             SqlNode node, Set<String> lambdaParameters) {
+        return findLambdaParameterReference(node, lambdaParameters, Collections.emptySet());
+    }
+
+    private static @Nullable String findLambdaParameterReference(
+            SqlNode node, Set<String> lambdaParameters, Set<String> tableAliases) {
         if (lambdaParameters.isEmpty()) {
             return null;
         }
         if (node instanceof SqlIdentifier) {
-            final String name = ((SqlIdentifier) node).names.get(0);
-            return lambdaParameters.contains(name) ? name : null;
+            final SqlIdentifier identifier = (SqlIdentifier) node;
+            final String name = identifier.names.get(0);
+            if (!lambdaParameters.contains(name)
+                    || (!identifier.isSimple() && tableAliases.contains(name))) {
+                return null;
+            }
+            return name;
         }
         if (node instanceof SqlLambda) {
             final SqlLambda lambda = (SqlLambda) node;
             final Set<String> shadowed = new HashSet<>(lambdaParameters);
             lambda.getParameters().forEach(parameter -> shadowed.remove(parameter.toString()));
-            return findLambdaParameterReference(lambda.getExpression(), shadowed);
+            return findLambdaParameterReference(lambda.getExpression(), shadowed, tableAliases);
+        }
+        if (node instanceof SqlSelect) {
+            return findLambdaParameterReferenceInSelect(
+                    (SqlSelect) node, lambdaParameters, tableAliases);
+        }
+        if (node instanceof SqlWithItem) {
+            return findLambdaParameterReference(
+                    ((SqlWithItem) node).query, lambdaParameters, tableAliases);
+        }
+        if (node.getKind() == SqlKind.AS) {
+            return findLambdaParameterReference(
+                    ((SqlCall) node).operand(0), lambdaParameters, tableAliases);
         }
         final List<SqlNode> children;
         if (node instanceof SqlNodeList) {
@@ -431,13 +514,87 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
         }
         for (SqlNode child : children) {
             if (child != null) {
-                final String found = findLambdaParameterReference(child, lambdaParameters);
+                final String found =
+                        findLambdaParameterReference(child, lambdaParameters, tableAliases);
                 if (found != null) {
                     return found;
                 }
             }
         }
         return null;
+    }
+
+    /**
+     * Like {@link #findLambdaParameterReference(SqlNode, Set, Set)} for a {@code SELECT}. Its table
+     * aliases are visible in its other clauses and in the sub-queries nested there, but not in its
+     * own {@code FROM} items, apart from the condition of a join (Calcite registers a derived table
+     * in the scope that encloses the {@code SELECT}).
+     */
+    private static @Nullable String findLambdaParameterReferenceInSelect(
+            SqlSelect select, Set<String> lambdaParameters, Set<String> tableAliases) {
+        final SqlNode from = select.getFrom();
+        final Set<String> visible = new HashSet<>(tableAliases);
+        if (from != null) {
+            final String found =
+                    findLambdaParameterReferenceInFrom(from, lambdaParameters, tableAliases);
+            if (found != null) {
+                return found;
+            }
+            collectTableAliases(from, visible);
+        }
+        for (SqlNode operand : select.getOperandList()) {
+            if (operand != null && operand != from) {
+                final String found =
+                        findLambdaParameterReference(operand, lambdaParameters, visible);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static @Nullable String findLambdaParameterReferenceInFrom(
+            SqlNode from, Set<String> lambdaParameters, Set<String> tableAliases) {
+        if (from instanceof SqlIdentifier) {
+            // a table name
+            return null;
+        }
+        if (from.getKind() == SqlKind.AS) {
+            return findLambdaParameterReferenceInFrom(
+                    ((SqlCall) from).operand(0), lambdaParameters, tableAliases);
+        }
+        if (from instanceof SqlJoin) {
+            final SqlJoin join = (SqlJoin) from;
+            for (SqlNode side : Arrays.asList(join.getLeft(), join.getRight())) {
+                final String found =
+                        findLambdaParameterReferenceInFrom(side, lambdaParameters, tableAliases);
+                if (found != null) {
+                    return found;
+                }
+            }
+            final SqlNode condition = join.getCondition();
+            if (condition == null) {
+                return null;
+            }
+            final Set<String> visible = new HashSet<>(tableAliases);
+            collectTableAliases(join, visible);
+            return findLambdaParameterReference(condition, lambdaParameters, visible);
+        }
+        return findLambdaParameterReference(from, lambdaParameters, tableAliases);
+    }
+
+    /** Adds the aliases that the given {@code FROM} item declares, explicitly or implicitly. */
+    private static void collectTableAliases(SqlNode from, Set<String> aliases) {
+        if (from instanceof SqlJoin) {
+            collectTableAliases(((SqlJoin) from).getLeft(), aliases);
+            collectTableAliases(((SqlJoin) from).getRight(), aliases);
+            return;
+        }
+        final String alias = SqlValidatorUtil.alias(from);
+        if (alias != null) {
+            aliases.add(alias);
+        }
     }
 
     @Override
